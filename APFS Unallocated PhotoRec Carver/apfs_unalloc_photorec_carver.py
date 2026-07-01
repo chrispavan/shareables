@@ -39,7 +39,7 @@
 import os
 import csv
 import jarray
-import inspect
+import sys
 import traceback
 
 # --- Java / Autopsy imports (resolved by Jython at runtime) ------------------
@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.1.3"
+MODULE_VERSION = "1.2.0"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -752,11 +752,38 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         self.context = None
         self.logger = Logger.getLogger(MODULE_NAME)
         self.services = IngestServices.getInstance()
-        self._sha256_digest = None  # reused MessageDigest
+        # Single reusable I/O buffer shared by extraction and hashing. These
+        # never run concurrently (one range at a time, single-threaded), so one
+        # buffer avoids re-allocating/zeroing an 8 MB jarray on every call --
+        # which, across thousands of carved files, was heavy GC/memory churn.
+        self._io_buf = None
+        # Reused MessageDigest instances (reset before each use) so we don't
+        # allocate a fresh MD5+SHA-256 pair per range and per carved file.
+        self._md5 = None
+        self._sha256 = None
+
+    def _io_buffer(self):
+        if self._io_buf is None:
+            self._io_buf = jarray.zeros(READ_CHUNK_SIZE, "b")
+        return self._io_buf
+
+    def _get_digests(self):
+        if self._md5 is None:
+            self._md5 = MessageDigest.getInstance("MD5")
+            self._sha256 = MessageDigest.getInstance("SHA-256")
+        self._md5.reset()
+        self._sha256.reset()
+        return self._md5, self._sha256
 
     def log(self, level, msg):
-        self.logger.logp(level, self.__class__.__name__,
-                         inspect.stack()[1][3], msg)
+        # sys._getframe is dramatically cheaper than inspect.stack(): the latter
+        # reads source files and builds the whole stack on every call, which was
+        # real per-file CPU+disk overhead given how often we log.
+        try:
+            caller = sys._getframe(1).f_code.co_name
+        except Exception:
+            caller = ""
+        self.logger.logp(level, self.__class__.__name__, caller, msg)
 
     # ----- lifecycle -------------------------------------------------------
     def startUp(self, context):
@@ -989,9 +1016,8 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
     def _extract_range_to_bin(self, lf, file_offset, byte_len, bin_path):
         """Read one range from the LayoutFile in chunks and write it to a .bin,
         computing MD5 and SHA-256 in the same pass. Returns (md5_hex, sha256)."""
-        md5 = MessageDigest.getInstance("MD5")
-        sha256 = MessageDigest.getInstance("SHA-256")
-        buf = jarray.zeros(READ_CHUNK_SIZE, "b")
+        md5, sha256 = self._get_digests()
+        buf = self._io_buffer()
         out = FileOutputStream(File(bin_path))
         remaining = long(byte_len)
         local_off = long(file_offset)
@@ -1081,8 +1107,9 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                     dest = os.path.join(dest_dir, out_name)
                     Files.move(Paths.get(src), Paths.get(dest),
                                StandardCopyOption.REPLACE_EXISTING)
-                    sha256_hex = self._hash_file(dest, "SHA-256")
-                    md5_hex = self._hash_file(dest, "MD5")
+                    # Hash MD5 + SHA-256 in a single read pass (was two full
+                    # reads of every carved file).
+                    md5_hex, sha256_hex = self._hash_file_md5_sha256(dest)
                     self.log(Level.INFO,
                              "Carved %s mime=%s md5=%s sha256=%s" %
                              (out_name, mime, md5_hex, sha256_hex))
@@ -1121,23 +1148,26 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
     def detect_mime_for_path(self, path):
         """MIME type for an on-disk carved file.
 
-        Autopsy's FileTypeDetector operates on AbstractFile objects, not on a
-        path on disk, so it is not directly usable until/unless the carved file
-        is added back to the case as a derived file. We therefore use
-        java.nio.file.Files.probeContentType and fall back to
-        application/octet-stream. (FileTypeDetector wiring is left as an
-        optional enhancement for the derived-file path.)"""
+        PhotoRec names each carved file with a signature-based extension, so we
+        map that extension to a MIME type FIRST -- a pure dict lookup with no
+        I/O. Only when the extension is unknown do we fall back to
+        java.nio.file.Files.probeContentType (which can open/read the file).
+        Doing it in this order avoids an extra file open+read for every single
+        carved file, which was a significant per-file cost.
+
+        (Autopsy's FileTypeDetector operates on AbstractFile objects, not paths
+        on disk, so it is not directly usable here; the extension map and
+        probeContentType are the practical options.)"""
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        guess = EXT_MIME_HINTS.get(ext)
+        if guess:
+            return guess
         try:
             mime = Files.probeContentType(Paths.get(path))
             if mime:
                 return mime
         except Exception:
             pass
-        # As a secondary hint, use the signature-based extension PhotoRec gave.
-        ext = os.path.splitext(path)[1].lower().lstrip(".")
-        guess = EXT_MIME_HINTS.get(ext)
-        if guess:
-            return guess
         return DEFAULT_MIME
 
     # ----- derived files (optional) ----------------------------------------
@@ -1247,19 +1277,22 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             return []
         return list(names)
 
-    def _hash_file(self, path, algo):
-        digest = MessageDigest.getInstance(algo)
-        buf = jarray.zeros(READ_CHUNK_SIZE, "b")
+    def _hash_file_md5_sha256(self, path):
+        """Compute MD5 and SHA-256 of a file in a SINGLE read pass, reusing the
+        shared I/O buffer. Returns (md5_hex, sha256_hex)."""
+        md5, sha256 = self._get_digests()
+        buf = self._io_buffer()
         stream = FileInputStream(File(path))
         try:
             while True:
                 nread = stream.read(buf)
                 if nread <= 0:
                     break
-                digest.update(buf, 0, nread)
+                md5.update(buf, 0, nread)
+                sha256.update(buf, 0, nread)
         finally:
             stream.close()
-        return self._hex(digest.digest())
+        return (self._hex(md5.digest()), self._hex(sha256.digest()))
 
     def _hex(self, byte_array):
         # byte_array is a Java signed-byte array; format unsigned hex.
