@@ -67,6 +67,9 @@ from javax.swing import BoxLayout
 from javax.swing import DefaultComboBoxModel
 from javax.swing import BorderFactory
 from java.awt import Dimension
+from java.awt import GridBagLayout
+from java.awt import GridBagConstraints
+from java.awt import Insets
 
 from org.sleuthkit.datamodel import TskData
 from org.sleuthkit.datamodel import TskCoreException
@@ -104,13 +107,18 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.1.0"
+MODULE_VERSION = "1.1.1"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
 READ_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
 
 DEFAULT_MIME = "application/octet-stream"
+
+# Default location the settings panel pre-fills for photorec_win.exe. This is
+# only a starting value -- the analyst can change it, and startUp() still
+# validates that whatever path is set actually exists.
+DEFAULT_PHOTOREC_PATH = "C:\\tools\\testdisk-7.2\\photorec_win.exe"
 
 # ---------------------------------------------------------------------------
 # Supported PhotoRec file families exposed by this module.
@@ -425,8 +433,8 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
         # Selected volume id is a LABEL/context only; it does NOT scope carving.
         self.selected_volume_id = -1
         self.selected_volume_label = "(container-wide)"
-        # Path to photorec_win.exe.
-        self.photorec_path = ""
+        # Path to photorec_win.exe (pre-filled to a sensible default).
+        self.photorec_path = DEFAULT_PHOTOREC_PATH
         # PhotoRec file families to carve. Default: WAV only.
         self.selected_families = list(DEFAULT_FAMILIES)
         # Advanced: if non-empty, this raw /cmd tail is used verbatim and the
@@ -450,7 +458,7 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
         return getattr(self, "selected_volume_label", "(container-wide)")
 
     def getPhotorecPath(self):
-        return getattr(self, "photorec_path", "")
+        return getattr(self, "photorec_path", DEFAULT_PHOTOREC_PATH)
 
     def setPhotorecPath(self, path):
         self.photorec_path = path
@@ -534,39 +542,57 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
             volumes = []
         return volumes
 
+    def _grid_add(self, comp, fill=None, weighty=0.0, top=4):
+        """Add one component as a full-width row in the GridBagLayout. Using an
+        explicit GridBagLayout (rather than BoxLayout) is what makes the labels
+        reliably render inside Autopsy's ingest-settings dialog."""
+        if fill is None:
+            fill = GridBagConstraints.HORIZONTAL
+        gbc = GridBagConstraints()
+        gbc.gridx = 0
+        gbc.gridy = self._row_y
+        gbc.anchor = GridBagConstraints.NORTHWEST
+        gbc.fill = fill
+        gbc.weightx = 1.0
+        gbc.weighty = weighty
+        gbc.insets = Insets(top, 6, 2, 6)
+        self.add(comp, gbc)
+        self._row_y = self._row_y + 1
+
     def initComponents(self):
-        self.setLayout(BoxLayout(self, BoxLayout.Y_AXIS))
+        self.setLayout(GridBagLayout())
         self.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8))
+        self._row_y = 0
 
         # Disclaimer (container-level carving).
         self.disclaimer = JLabel(
             "<html><b>Note:</b> APFS frees blocks at the container/pool level. "
-            "Unallocated carving here is <u>container-wide, not volume-specific</u>. "
-            "The volume choice below is a label/context only.</html>")
-        self.add(self.disclaimer)
-        self.add(JLabel(" "))
+            "Unallocated carving here is <u>container-wide, not volume-specific"
+            "</u>. The volume choice below is a label/context only.</html>")
+        self._grid_add(self.disclaimer, top=2)
 
-        # Volume selector (label/context only).
-        self.add(JLabel("Volume (context/label only - does NOT scope carving):"))
-        self.volumeCombo = JComboBox()
-        self.volumeCombo.setMaximumSize(Dimension(600, 28))
-        self.add(self.volumeCombo)
-        self.add(JLabel(" "))
-
-        # PhotoRec path + chooser.
-        self.add(JLabel("Path to photorec_win.exe:"))
+        # --- PhotoRec path + chooser (put first: it is what people look for) ---
+        self._grid_add(JLabel("Path to photorec_win.exe (required):"), top=10)
+        pathRow = JPanel()
+        pathRow.setLayout(BoxLayout(pathRow, BoxLayout.X_AXIS))
         self.photorecField = JTextField(40)
-        self.photorecField.setMaximumSize(Dimension(600, 28))
-        self.add(self.photorecField)
         self.browseButton = JButton("Browse...",
                                      actionPerformed=self.onBrowse)
-        self.add(self.browseButton)
-        self.add(JLabel(" "))
+        pathRow.add(self.photorecField)
+        pathRow.add(self.browseButton)
+        self._grid_add(pathRow)
+
+        # Volume selector (label/context only).
+        self._grid_add(
+            JLabel("Volume (context/label only - does NOT scope carving):"),
+            top=10)
+        self.volumeCombo = JComboBox()
+        self._grid_add(self.volumeCombo)
 
         # File families to carve (default: WAV only).
-        self.add(JLabel("<html>File types to carve "
-                        "(<b>default: WAV only</b>). Each maps to a MIME "
-                        "folder in the output:</html>"))
+        self._grid_add(JLabel("<html>File types to carve "
+                              "(<b>default: WAV only</b>). Each maps to a MIME "
+                              "folder in the output:</html>"), top=10)
         familiesPanel = JPanel()
         familiesPanel.setLayout(BoxLayout(familiesPanel, BoxLayout.Y_AXIS))
         self.family_checks = {}   # photorec_key -> JCheckBox
@@ -575,30 +601,31 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
             self.family_checks[key] = cb
             familiesPanel.add(cb)
         scroll = JScrollPane(familiesPanel)
-        scroll.setPreferredSize(Dimension(560, 200))
-        scroll.setMaximumSize(Dimension(600, 220))
-        self.add(scroll)
+        scroll.setPreferredSize(Dimension(560, 180))
+        self._grid_add(scroll, fill=GridBagConstraints.BOTH, weighty=1.0)
+
+        buttonRow = JPanel()
+        buttonRow.setLayout(BoxLayout(buttonRow, BoxLayout.X_AXIS))
         self.selectAllButton = JButton("Select all",
                                        actionPerformed=self.onSelectAll)
         self.selectNoneButton = JButton("Select none (WAV default)",
                                         actionPerformed=self.onSelectNone)
-        self.add(self.selectAllButton)
-        self.add(self.selectNoneButton)
-        self.add(JLabel(" "))
+        buttonRow.add(self.selectAllButton)
+        buttonRow.add(self.selectNoneButton)
+        self._grid_add(buttonRow, fill=GridBagConstraints.NONE)
 
         # Advanced raw command override (blank = build from the checkboxes).
-        self.add(JLabel("<html><b>Advanced:</b> raw PhotoRec /cmd override "
-                        "(blank = use the selection above):</html>"))
+        self._grid_add(JLabel("<html><b>Advanced:</b> raw PhotoRec /cmd "
+                              "override (blank = use the selection above):"
+                              "</html>"), top=10)
         self.cmdField = JTextField(40)
-        self.cmdField.setMaximumSize(Dimension(600, 28))
-        self.add(self.cmdField)
-        self.add(JLabel(" "))
+        self._grid_add(self.cmdField)
 
         # Derived files checkbox.
         self.derivedCheck = JCheckBox(
             "Register carved files as derived files in the case",
             actionPerformed=self.onDerivedToggle)
-        self.add(self.derivedCheck)
+        self._grid_add(self.derivedCheck, top=10)
 
     def customizeComponents(self):
         # Populate volume combo.

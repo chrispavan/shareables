@@ -87,12 +87,12 @@ modules folder.)
    **Tools → Run Ingest Modules** on an existing data source.
 3. Select **"APFS Unalloc PhotoRec Carver"** and configure:
    - **Volume** — context/label only; does not scope carving.
-   - **Path to `photorec_win.exe`** — **required, no default is assumed.** You
-     supply the full path (text field or Browse). The module refuses to start
-     (`IngestModuleException`) if the path does not exist. There is no bundled
-     PhotoRec and no hardcoded install location — point it at wherever you
-     unpacked the TestDisk/PhotoRec distribution, e.g.
-     `C:\tools\testdisk-7.2\photorec_win.exe`.
+   - **Path to `photorec_win.exe`** — the **first field** in the panel.
+     Pre-filled to `C:\tools\testdisk-7.2\photorec_win.exe` as a convenience;
+     edit it (or use **Browse…**) to point at wherever you unpacked the
+     TestDisk/PhotoRec distribution. There is no bundled PhotoRec. The module
+     refuses to start (`IngestModuleException`) if the path does not exist, so
+     the default only helps if PhotoRec really is installed there.
    - **File types to carve** — a checklist of supported families (see below).
      **The default is WAV only.** Nothing else is carved unless you tick it.
      Use *Select all* / *Select none (WAV default)* for the extremes.
