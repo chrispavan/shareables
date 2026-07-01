@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.1.1"
+MODULE_VERSION = "1.1.2"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -759,12 +759,56 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
     def startUp(self, context):
         self.context = context
         photorec = self.local_settings.getPhotorecPath()
-        if not photorec or not os.path.exists(photorec):
+        # Clean stray surrounding quotes/whitespace a user may have pasted in.
+        if photorec:
+            photorec = photorec.strip()
+            if len(photorec) >= 2 and photorec[0] == '"' and photorec[-1] == '"':
+                photorec = photorec[1:-1].strip()
+        # Validate with java.io.File, NOT os.path.exists: under Jython 2.7 on
+        # Windows os.path.exists is unreliable for absolute paths, which made
+        # startUp reject a photorec_win.exe that was actually present.
+        exists = False
+        if photorec:
+            try:
+                f = File(photorec)
+                exists = f.exists() and f.isFile()
+            except Exception:
+                exists = False
+        if not exists:
             raise IngestModuleException(
-                "PhotoRec executable not found at: %s. Set a valid path to "
-                "photorec_win.exe in the module settings." % (photorec,))
+                "PhotoRec executable not found at: %s. Set a valid full path "
+                "to photorec_win.exe (the .exe itself, not the folder) in the "
+                "module settings.%s" % (photorec, self._exe_hint(photorec)))
+        # Cache the cleaned, validated path for use during process().
+        self._photorec_exe = photorec
         self.log(Level.INFO, "APFS Unalloc PhotoRec Carver starting; "
                  "photorec=%s" % (photorec,))
+
+    def _exe_hint(self, photorec):
+        """Best-effort diagnostic appended to the not-found error: list the
+        .exe files actually present in the intended parent directory. This
+        surfaces hidden-extension (photorec_win.exe.exe) or wrong-folder-name
+        cases immediately."""
+        try:
+            if not photorec:
+                return ""
+            parent = File(photorec).getParentFile()
+            if parent is None or not parent.isDirectory():
+                return (" The folder %s does not exist." %
+                        (parent.getPath() if parent else "(none)",))
+            exes = []
+            listing = parent.listFiles()
+            if listing is not None:
+                for entry in listing:
+                    nm = entry.getName()
+                    if nm.lower().endswith(".exe"):
+                        exes.append(nm)
+            if exes:
+                return (" .exe files found in %s: %s" %
+                        (parent.getPath(), ", ".join(sorted(exes))))
+            return (" No .exe files were found in %s." % (parent.getPath(),))
+        except Exception:
+            return ""
 
     def process(self, dataSource, progressBar):
         try:
@@ -964,7 +1008,9 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
     def _run_photorec(self, bin_path, recup_prefix):
         """Invoke photorec_win.exe on one bin via ProcessBuilder + ExecUtil so
         Autopsy can kill it on cancellation."""
-        photorec = self.local_settings.getPhotorecPath()
+        # Use the cleaned/validated path cached in startUp when available.
+        photorec = getattr(self, "_photorec_exe", None) \
+            or self.local_settings.getPhotorecPath()
         cmd = self.local_settings.getPhotorecCmd()
         # photorec_win.exe /log /d <recup_prefix> /cmd "<bin>" <cmd>
         args = [photorec, "/log", "/d", recup_prefix, "/cmd", bin_path, cmd]
@@ -983,7 +1029,7 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         """Copy the photorec.log produced for a bin into a per-bin logs file so
         every log is preserved even after work dirs are sorted/cleaned."""
         src = os.path.join(bin_work, "photorec.log")
-        if os.path.exists(src):
+        if File(src).isFile():
             dst = os.path.join(logs_dir, "%s.photorec.log" % (bin_base,))
             try:
                 Files.copy(Paths.get(src), Paths.get(dst),
@@ -999,41 +1045,62 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         manifest row. Returns the count of carved files processed."""
         count = 0
         # PhotoRec creates <recup_prefix>.1, .2, ... i.e. recup_dir.N here.
+        # Walk with java.io.File (not os.walk / os.path.isdir) for the same
+        # Jython-on-Windows reliability reasons as the startUp path check.
         for entry in self._list_dir(bin_work):
             full = os.path.join(bin_work, entry)
-            if not os.path.isdir(full):
+            if not File(full).isDirectory():
                 continue
             if not entry.startswith("recup_dir"):
                 continue
-            for root, dirs, files in os.walk(full):
-                for fname in files:
-                    if is_photorec_artifact(fname):
-                        continue
-                    src = os.path.join(root, fname)
-                    try:
-                        mime = self.detect_mime_for_path(src)
-                        folder = mime_to_folder(mime)
-                        dest_dir = os.path.join(carved_dir, folder)
-                        self._ensure_dir(dest_dir)
-                        out_name = carved_output_name(bin_base, fname)
-                        dest = os.path.join(dest_dir, out_name)
-                        Files.move(Paths.get(src), Paths.get(dest),
-                                   StandardCopyOption.REPLACE_EXISTING)
-                        sha256_hex = self._hash_file(dest, "SHA-256")
-                        md5_hex = self._hash_file(dest, "MD5")
-                        self.log(Level.INFO,
-                                 "Carved %s mime=%s md5=%s sha256=%s" %
-                                 (out_name, mime, md5_hex, sha256_hex))
-                        manifest_rows.append(
-                            [source_bin, dest, mime, sha256_hex])
-                        count = count + 1
-                        if self.local_settings.getAddDerivedFiles():
-                            self._maybe_add_derived(dest, out_name, lf)
-                    except Exception:
-                        self.log(Level.WARNING,
-                                 "Failed sorting carved file %s: %s" %
-                                 (src, traceback.format_exc()))
+            for src in self._iter_files(full):
+                fname = os.path.basename(src)
+                if is_photorec_artifact(fname):
+                    continue
+                try:
+                    mime = self.detect_mime_for_path(src)
+                    folder = mime_to_folder(mime)
+                    dest_dir = os.path.join(carved_dir, folder)
+                    self._ensure_dir(dest_dir)
+                    out_name = carved_output_name(bin_base, fname)
+                    dest = os.path.join(dest_dir, out_name)
+                    Files.move(Paths.get(src), Paths.get(dest),
+                               StandardCopyOption.REPLACE_EXISTING)
+                    sha256_hex = self._hash_file(dest, "SHA-256")
+                    md5_hex = self._hash_file(dest, "MD5")
+                    self.log(Level.INFO,
+                             "Carved %s mime=%s md5=%s sha256=%s" %
+                             (out_name, mime, md5_hex, sha256_hex))
+                    manifest_rows.append(
+                        [source_bin, dest, mime, sha256_hex])
+                    count = count + 1
+                    if self.local_settings.getAddDerivedFiles():
+                        self._maybe_add_derived(dest, out_name, lf)
+                except Exception:
+                    self.log(Level.WARNING,
+                             "Failed sorting carved file %s: %s" %
+                             (src, traceback.format_exc()))
         return count
+
+    def _iter_files(self, root_path):
+        """Recursively return absolute paths of all files under root_path,
+        using java.io.File (robust on Jython/Windows)."""
+        results = []
+        stack = [File(root_path)]
+        while stack:
+            d = stack.pop()
+            entries = d.listFiles()
+            if entries is None:
+                continue
+            for e in entries:
+                try:
+                    if e.isDirectory():
+                        stack.append(e)
+                    elif e.isFile():
+                        results.append(e.getAbsolutePath())
+                except Exception:
+                    continue
+        return results
 
     # ----- MIME detection --------------------------------------------------
     def detect_mime_for_path(self, path):
@@ -1066,7 +1133,7 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         failure here never breaks the job."""
         try:
             fm = Case.getCurrentCase().getServices().getFileManager()
-            size = os.path.getsize(local_path)
+            size = File(local_path).length()
             # TODO: verify FileManager.addDerivedFile(...) signature for the
             # installed Autopsy build. Timestamps are recovery-time only and
             # therefore set to 0 (untrustworthy by definition for carved data).
@@ -1150,18 +1217,20 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         return "%s_%s" % (safe, ds_id)
 
     def _ensure_dir(self, path):
-        if not os.path.isdir(path):
-            try:
-                os.makedirs(path)
-            except OSError:
-                if not os.path.isdir(path):
-                    raise
+        # Use java.io.File (not os.makedirs / os.path.isdir): more reliable
+        # under Jython 2.7 on Windows for absolute paths.
+        d = File(path)
+        if not d.isDirectory():
+            d.mkdirs()
+            if not d.isDirectory():
+                raise IOError("Could not create directory: %s" % (path,))
 
     def _list_dir(self, path):
-        try:
-            return os.listdir(path)
-        except OSError:
+        d = File(path)
+        names = d.list()
+        if names is None:
             return []
+        return list(names)
 
     def _hash_file(self, path, algo):
         digest = MessageDigest.getInstance(algo)
