@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.2.1"
+MODULE_VERSION = "1.2.2"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -761,6 +761,8 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         # allocate a fresh MD5+SHA-256 pair per range and per carved file.
         self._md5 = None
         self._sha256 = None
+        # Shared empty file used to hand PhotoRec an EOF on stdin (created once).
+        self._empty_stdin_path = None
 
     def _io_buffer(self):
         if self._io_buf is None:
@@ -1061,26 +1063,41 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         # Run with cwd = the bin's work dir so photorec.log lands there.
         pb.directory(File(work))
         pb.redirectErrorStream(True)
-        # CRITICAL: drain PhotoRec's console output to a file. PhotoRec is a
-        # console app that prints progress to stdout; ExecUtil does NOT read the
-        # process streams, so if we leave stdout as a pipe it fills after a few
-        # KB, PhotoRec blocks on write, and ExecUtil waits forever -> a hang
-        # with no CPU/disk activity. Redirecting to a file keeps it flowing.
-        console_log = os.path.join(work, "photorec_console.log")
-        pb.redirectOutput(File(console_log))
-        # Feed EOF on stdin (an empty file) so that if PhotoRec ever expects
-        # interactive input it gets EOF and exits rather than blocking.
-        empty_in = os.path.join(work, "photorec_stdin.empty")
+        # Drain PhotoRec's console output by DISCARDING it at the OS level (the
+        # null device). It is pure progress spam; PhotoRec's own photorec.log
+        # (kept via /log) is the real diagnostic record. This drains the stream
+        # so PhotoRec never blocks on a full pipe (the earlier hang) with ZERO
+        # disk writes and ZERO in-memory buffering.
         try:
-            File(empty_in).createNewFile()
-            pb.redirectInput(File(empty_in))
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD)
         except Exception:
-            pass
+            # Fallback for older JVMs: the Windows null device (also zero disk).
+            pb.redirectOutput(File("NUL"))
+        # Feed EOF on stdin (a single shared empty file, created once) so that
+        # if PhotoRec ever expects interactive input it gets EOF and exits
+        # rather than blocking.
+        eof_file = self._stdin_eof_file(os.path.dirname(work))
+        if eof_file:
+            pb.redirectInput(File(eof_file))
         # ExecUtil.execute(ProcessBuilder, ProcessTerminator) -> int exit code.
         # DataSourceIngestModuleProcessTerminator(context) (from the .ingest
         # package) ties process lifetime to data-source ingest cancellation.
         terminator = DataSourceIngestModuleProcessTerminator(self.context)
         return ExecUtil.execute(pb, terminator)
+
+    def _stdin_eof_file(self, near_dir):
+        """Path to a single shared empty file used to give PhotoRec an EOF on
+        stdin. Created once per job (under the case module directory), reused
+        for every bin -- no per-bin file churn."""
+        path = getattr(self, "_empty_stdin_path", None)
+        if path is None:
+            path = os.path.join(near_dir, "photorec_stdin.empty")
+            try:
+                File(path).createNewFile()
+            except Exception:
+                path = None
+            self._empty_stdin_path = path
+        return self._empty_stdin_path
 
     def _preserve_photorec_log(self, bin_work, logs_dir, bin_base):
         """Copy the photorec.log produced for a bin into a per-bin logs file so
