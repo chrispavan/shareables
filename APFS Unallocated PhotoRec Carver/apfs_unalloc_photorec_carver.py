@@ -86,7 +86,10 @@ from org.sleuthkit.autopsy.casemodule import Case
 from org.sleuthkit.autopsy.casemodule.services import FileManager
 from org.sleuthkit.autopsy.coreutils import Logger
 from org.sleuthkit.autopsy.coreutils import ExecUtil
-from org.sleuthkit.autopsy.coreutils.ExecUtil import DataSourceIngestModuleProcessTerminator
+# DataSourceIngestModuleProcessTerminator is a top-level class in the .ingest
+# package (it implements ExecUtil.ProcessTerminator); it is NOT nested inside
+# ExecUtil. Importing it from ExecUtil raises ImportError.
+from org.sleuthkit.autopsy.ingest import DataSourceIngestModuleProcessTerminator
 
 # FileTypeDetector operates on AbstractFile, not on a path on disk, so it is
 # only usable here once carved files are added back into the case as derived
@@ -100,7 +103,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.0.1"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -718,8 +721,8 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         pb.directory(File(os.path.dirname(recup_prefix)))
         pb.redirectErrorStream(True)
         # ExecUtil.execute(ProcessBuilder, ProcessTerminator) -> int exit code.
-        # TODO: verify signature; DataSourceIngestModuleProcessTerminator(context)
-        # ties process lifetime to data-source ingest cancellation.
+        # DataSourceIngestModuleProcessTerminator(context) (from the .ingest
+        # package) ties process lifetime to data-source ingest cancellation.
         terminator = DataSourceIngestModuleProcessTerminator(self.context)
         return ExecUtil.execute(pb, terminator)
 
