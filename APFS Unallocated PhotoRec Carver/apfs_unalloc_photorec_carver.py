@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.1.2"
+MODULE_VERSION = "1.1.3"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -390,7 +390,10 @@ def build_photorec_command(families):
 class ApfsUnallocCarverFactory(IngestModuleFactoryAdapter):
 
     def getModuleDisplayName(self):
-        return MODULE_NAME
+        # Version is intentionally in the display name so the running build is
+        # obvious in the module list and in any error message Autopsy prefixes
+        # with the module name.
+        return "%s v%s" % (MODULE_NAME, MODULE_VERSION)
 
     def getModuleDescription(self):
         return ("Extracts APFS pool/container-level unallocated runs to one "
@@ -758,7 +761,8 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
     # ----- lifecycle -------------------------------------------------------
     def startUp(self, context):
         self.context = context
-        photorec = self.local_settings.getPhotorecPath()
+        raw = self.local_settings.getPhotorecPath()
+        photorec = raw
         # Clean stray surrounding quotes/whitespace a user may have pasted in.
         if photorec:
             photorec = photorec.strip()
@@ -768,21 +772,32 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         # Windows os.path.exists is unreliable for absolute paths, which made
         # startUp reject a photorec_win.exe that was actually present.
         exists = False
+        is_file = False
         if photorec:
             try:
                 f = File(photorec)
-                exists = f.exists() and f.isFile()
+                exists = f.exists()
+                is_file = f.isFile()
             except Exception:
                 exists = False
-        if not exists:
+                is_file = False
+        # Loud log line so the running build and the exact check are visible in
+        # autopsy.log regardless of what the popup shows.
+        self.log(Level.INFO,
+                 "APFS carver v%s startUp: raw_path=%r cleaned=%r "
+                 "File.exists=%s File.isFile=%s" %
+                 (MODULE_VERSION, raw, photorec, exists, is_file))
+        if not (exists and is_file):
             raise IngestModuleException(
-                "PhotoRec executable not found at: %s. Set a valid full path "
-                "to photorec_win.exe (the .exe itself, not the folder) in the "
-                "module settings.%s" % (photorec, self._exe_hint(photorec)))
+                "[v%s] PhotoRec not found. Path checked: '%s' "
+                "(File.exists=%s, isFile=%s).%s Set the full path to "
+                "photorec_win.exe (the .exe itself, not the folder)." %
+                (MODULE_VERSION, photorec, exists, is_file,
+                 self._exe_hint(photorec)))
         # Cache the cleaned, validated path for use during process().
         self._photorec_exe = photorec
-        self.log(Level.INFO, "APFS Unalloc PhotoRec Carver starting; "
-                 "photorec=%s" % (photorec,))
+        self.log(Level.INFO, "APFS carver v%s starting; photorec=%s" %
+                 (MODULE_VERSION, photorec))
 
     def _exe_hint(self, photorec):
         """Best-effort diagnostic appended to the not-found error: list the
