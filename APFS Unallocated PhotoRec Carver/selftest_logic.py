@@ -23,10 +23,15 @@ HELPERS = [
     "is_photorec_artifact",
     "carved_output_name",
     "manifest_header",
+    "content_type_name",
+    "is_structural_content",
 ]
 
 # Constants the helpers reference at module scope.
-PRELUDE = {"DEFAULT_MIME": "application/octet-stream"}
+PRELUDE = {
+    "DEFAULT_MIME": "application/octet-stream",
+    "STRUCTURAL_TYPE_NAMES": ("Image", "VolumeSystem", "Volume", "Pool"),
+}
 
 
 def load_helpers():
@@ -112,6 +117,42 @@ def run():
     eq(h["manifest_header"](),
        ["source_bin", "carved_file", "mime", "sha256"], "manifest header")
     checks += 1
+
+    # content_type_name / is_structural_content — the EDT-hang guard. These
+    # mirror Jython's Java Content objects with a tiny stub exposing
+    # getClass().getSimpleName(); None must degrade to "" / False, not raise.
+    class _SimpleName(object):
+        def __init__(self, name):
+            self._name = name
+
+        def getSimpleName(self):
+            return self._name
+
+    class _FakeContent(object):
+        def __init__(self, name):
+            self._sn = _SimpleName(name)
+
+        def getClass(self):
+            return self._sn
+
+    eq(h["content_type_name"](None), "", "type name of None")
+    eq(h["content_type_name"](_FakeContent("Volume")), "Volume", "type name")
+    eq(h["is_structural_content"](None), False, "None not structural")
+    eq(h["is_structural_content"](_FakeContent("Volume")), True, "Volume struct")
+    eq(h["is_structural_content"](_FakeContent("Pool")), True, "Pool struct")
+    eq(h["is_structural_content"](_FakeContent("Image")), True, "Image struct")
+    eq(h["is_structural_content"](_FakeContent("VolumeSystem")), True,
+       "VolumeSystem struct")
+    # The crucial negatives: never recurse into these (that is the hang).
+    eq(h["is_structural_content"](_FakeContent("FileSystem")), False,
+       "FileSystem NOT structural")
+    eq(h["is_structural_content"](_FakeContent("Directory")), False,
+       "Directory NOT structural")
+    eq(h["is_structural_content"](_FakeContent("File")), False,
+       "File NOT structural")
+    eq(h["is_structural_content"](_FakeContent("LayoutFile")), False,
+       "LayoutFile NOT structural")
+    checks += 11
 
     print("OK - %d assertions passed across %d helpers" %
           (checks, len(HELPERS)))

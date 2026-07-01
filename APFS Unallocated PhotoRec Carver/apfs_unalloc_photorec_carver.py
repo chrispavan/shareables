@@ -103,7 +103,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.0.1"
+MODULE_VERSION = "1.0.2"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -226,6 +226,38 @@ def manifest_header():
     return ["source_bin", "carved_file", "mime", "sha256"]
 
 
+# Structural (partitioning-level) Content types. We recurse ONLY into these
+# when looking for volumes / pool-level unallocated layout files, and NEVER
+# into file systems, directories or files. Descending into a FileSystem forces
+# The Sleuth Kit to lazily load the entire file tree from the database; doing
+# that on the Swing EDT while building the settings panel hangs all of Autopsy.
+# Matched by Java simple class name so no hard dependency on the Pool class
+# (added to TSK only with APFS support) is required at import time.
+STRUCTURAL_TYPE_NAMES = ("Image", "VolumeSystem", "Volume", "Pool")
+
+# Bound on structural-recursion depth; the partitioning hierarchy is shallow
+# (Image > VolumeSystem > Volume > Pool > Volume ...), so this is pure paranoia
+# against a pathological/cyclic tree.
+MAX_STRUCTURAL_DEPTH = 16
+
+
+def content_type_name(content):
+    """Java simple class name of a Content node, or '' if unavailable."""
+    try:
+        return content.getClass().getSimpleName()
+    except Exception:
+        return ""
+
+
+def is_structural_content(content):
+    """True only for partitioning-level nodes we may safely recurse into.
+
+    >>> is_structural_content(None)
+    False
+    """
+    return content_type_name(content) in STRUCTURAL_TYPE_NAMES
+
+
 # =============================================================================
 # Factory
 # =============================================================================
@@ -330,8 +362,15 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self.customizeComponents()
 
     # --- helpers to walk the case for Volume objects -----------------------
-    def _collect_volumes(self, content, found):
-        """Recursively gather Volume objects under a Content node."""
+    def _collect_volumes(self, content, found, depth=0):
+        """Gather Volume objects under a Content node.
+
+        Recurses ONLY through structural (partitioning-level) nodes. It must
+        never descend into a FileSystem/directory/file: that would trigger a
+        full lazy load of the file tree on the Swing EDT and hang Autopsy while
+        the Run Ingest Modules dialog is opening."""
+        if depth > MAX_STRUCTURAL_DEPTH:
+            return
         try:
             children = content.getChildren()
         except Exception:
@@ -340,8 +379,10 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
             try:
                 if isinstance(child, Volume):
                     found.append(child)
-                # Recurse: volumes live under volume systems / pools.
-                self._collect_volumes(child, found)
+                # Volumes can contain a Pool (APFS) which contains more
+                # volumes, so recurse into structural children only.
+                if is_structural_content(child):
+                    self._collect_volumes(child, found, depth + 1)
             except Exception:
                 # Never let one bad node break panel construction.
                 continue
@@ -835,9 +876,17 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                      (name, traceback.format_exc()))
 
     # ----- discovery -------------------------------------------------------
-    def _collect_unalloc_layout_files(self, content, out_list):
-        """Recursively gather children whose type == UNALLOC_BLOCKS. For APFS
-        these hang off the synthetic pool-level 'Unallocated' volume."""
+    def _collect_unalloc_layout_files(self, content, out_list, depth=0):
+        """Gather children whose type == UNALLOC_BLOCKS. For APFS these hang off
+        the synthetic pool-level 'Unallocated' volume, so they are direct
+        children of a structural (Pool/Volume) node.
+
+        Recursion is restricted to structural nodes; we deliberately do NOT
+        descend into file systems. Besides being far cheaper, this matches the
+        design: we only ever want the pool/container-level unallocated set, not
+        per-file-system unallocated blocks."""
+        if depth > MAX_STRUCTURAL_DEPTH:
+            return
         try:
             children = content.getChildren()
         except Exception:
@@ -856,9 +905,10 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                     # Do not recurse into the layout file itself.
                     continue
             except Exception:
-                # Some Content types have no getType(); just recurse.
+                # Some Content types have no getType(); fall through.
                 pass
-            self._collect_unalloc_layout_files(child, out_list)
+            if is_structural_content(child):
+                self._collect_unalloc_layout_files(child, out_list, depth + 1)
 
     # ----- directory + IO helpers -----------------------------------------
     def _prepare_dirs(self, dataSource):
