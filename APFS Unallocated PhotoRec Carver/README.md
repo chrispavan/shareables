@@ -87,11 +87,20 @@ modules folder.)
    **Tools → Run Ingest Modules** on an existing data source.
 3. Select **"APFS Unalloc PhotoRec Carver"** and configure:
    - **Volume** — context/label only; does not scope carving.
-   - **Path to `photorec_win.exe`** — required; the module refuses to start if
-     it does not exist.
-   - **PhotoRec command** — default
-     `wholespace,fileopt,everything,enable,search` (the bin *is* free space, so
-     `wholespace` is used; all file families enabled).
+   - **Path to `photorec_win.exe`** — **required, no default is assumed.** You
+     supply the full path (text field or Browse). The module refuses to start
+     (`IngestModuleException`) if the path does not exist. There is no bundled
+     PhotoRec and no hardcoded install location — point it at wherever you
+     unpacked the TestDisk/PhotoRec distribution, e.g.
+     `C:\tools\testdisk-7.2\photorec_win.exe`.
+   - **File types to carve** — a checklist of supported families (see below).
+     **The default is WAV only.** Nothing else is carved unless you tick it.
+     Use *Select all* / *Select none (WAV default)* for the extremes.
+   - **Advanced: raw PhotoRec `/cmd` override** — blank by default. If you type
+     a raw command tail here it is used verbatim and the checklist is ignored
+     (this reaches PhotoRec's full ~480-family signature set). The module always
+     uses `wholespace` because a bin *is* free space; a selection of families
+     builds `wholespace,fileopt,everything,disable,<fam>,enable,…,search`.
    - **Register carved files as derived files** — optional; off by default.
 4. Start ingest. Watch the **Ingest Inbox** for progress and the final summary,
    and open the report from the **Reports** tree.
@@ -99,6 +108,86 @@ modules folder.)
 If no pool-level `UNALLOC_BLOCKS` node is found, the module posts a **WARNING**
 explaining that TSK exposed no pool-level unallocated node and exits cleanly
 (no fabricated data).
+
+---
+
+## Supported file types → MIME → output folder
+
+**The default carve is WAV only.** Tick additional families in the settings
+panel to carve them; each carved file is sorted into a `carved/<mime>/` folder
+named from its detected MIME type. The families the checklist exposes:
+
+| PhotoRec key | MIME type | Description | Output folder |
+|---|---|---|---|
+| `wav` **(default)** | `audio/x-wav` | WAV / RIFF audio | `carved/audio_x-wav/` |
+| `mp3` | `audio/mpeg` | MP3 audio | `carved/audio_mpeg/` |
+| `ogg` | `audio/ogg` | Ogg Vorbis audio | `carved/audio_ogg/` |
+| `flac` | `audio/flac` | FLAC lossless audio | `carved/audio_flac/` |
+| `au` | `audio/basic` | Sun/NeXT AU audio | `carved/audio_basic/` |
+| `mid` | `audio/midi` | MIDI | `carved/audio_midi/` |
+| `aac` | `audio/aac` | AAC audio | `carved/audio_aac/` |
+| `wma` | `audio/x-ms-wma` | Windows Media Audio (ASF) | `carved/audio_x-ms-wma/` |
+| `mov` | `video/quicktime` | QuickTime / MP4 / 3GP (MOV family) | `carved/video_quicktime/` |
+| `mp4` | `video/mp4` | MP4 video | `carved/video_mp4/` |
+| `avi` | `video/x-msvideo` | AVI (RIFF video) | `carved/video_x-msvideo/` |
+| `mkv` | `video/x-matroska` | Matroska / WebM | `carved/video_x-matroska/` |
+| `mpg` | `video/mpeg` | MPEG program stream | `carved/video_mpeg/` |
+| `asf` | `video/x-ms-asf` | Windows Media Video (ASF) | `carved/video_x-ms-asf/` |
+| `flv` | `video/x-flv` | Flash video | `carved/video_x-flv/` |
+| `jpg` | `image/jpeg` | JPEG image | `carved/image_jpeg/` |
+| `png` | `image/png` | PNG image | `carved/image_png/` |
+| `gif` | `image/gif` | GIF image | `carved/image_gif/` |
+| `bmp` | `image/bmp` | BMP image | `carved/image_bmp/` |
+| `tif` | `image/tiff` | TIFF image | `carved/image_tiff/` |
+| `ico` | `image/x-icon` | Windows icon | `carved/image_x-icon/` |
+| `psd` | `image/vnd.adobe.photoshop` | Photoshop PSD | `carved/image_vnd.adobe.photoshop/` |
+| `cr2` | `image/x-canon-cr2` | Canon RAW (CR2) | `carved/image_x-canon-cr2/` |
+| `nef` | `image/x-nikon-nef` | Nikon RAW (NEF) | `carved/image_x-nikon-nef/` |
+| `orf` | `image/x-olympus-orf` | Olympus RAW (ORF) | `carved/image_x-olympus-orf/` |
+| `raf` | `image/x-fuji-raf` | Fujifilm RAW (RAF) | `carved/image_x-fuji-raf/` |
+| `rw2` | `image/x-panasonic-rw2` | Panasonic RAW (RW2) | `carved/image_x-panasonic-rw2/` |
+| `heic` | `image/heic` | HEIF/HEIC image | `carved/image_heic/` |
+| `webp` | `image/webp` | WebP image | `carved/image_webp/` |
+| `pdf` | `application/pdf` | PDF document | `carved/application_pdf/` |
+| `doc` | `application/msword` | MS Office OLE (doc/xls/ppt/msi) | `carved/application_msword/` |
+| `rtf` | `application/rtf` | Rich Text Format | `carved/application_rtf/` |
+| `txt` | `text/plain` | Plain text (and many text formats) | `carved/text_plain/` |
+| `html` | `text/html` | HTML | `carved/text_html/` |
+| `xml` | `application/xml` | XML | `carved/application_xml/` |
+| `zip` | `application/zip` | ZIP (also docx/xlsx/pptx/odt/epub/jar) | `carved/application_zip/` |
+| `gz` | `application/gzip` | gzip | `carved/application_gzip/` |
+| `bz2` | `application/x-bzip2` | bzip2 | `carved/application_x-bzip2/` |
+| `7z` | `application/x-7z-compressed` | 7-Zip | `carved/application_x-7z-compressed/` |
+| `rar` | `application/vnd.rar` | RAR | `carved/application_vnd.rar/` |
+| `tar` | `application/x-tar` | tar | `carved/application_x-tar/` |
+| `xz` | `application/x-xz` | xz | `carved/application_x-xz/` |
+| `cab` | `application/vnd.ms-cab-compressed` | Microsoft Cabinet | `carved/application_vnd.ms-cab-compressed/` |
+| `sqlite` | `application/x-sqlite3` | SQLite database | `carved/application_x-sqlite3/` |
+| `mdb` | `application/x-msaccess` | MS Access (MDB/ACCDB) | `carved/application_x-msaccess/` |
+| `dbf` | `application/x-dbf` | dBASE | `carved/application_x-dbf/` |
+| `pst` | `application/vnd.ms-outlook` | Outlook PST/OST | `carved/application_vnd.ms-outlook/` |
+| `evt` | `application/x-ms-evt` | Windows Event Log (legacy) | `carved/application_x-ms-evt/` |
+| `evtx` | `application/x-ms-evtx` | Windows Event Log (XML) | `carved/application_x-ms-evtx/` |
+| `exe` | `application/vnd.microsoft.portable-executable` | Windows PE | `carved/application_vnd.microsoft.portable-executable/` |
+| `elf` | `application/x-elf` | ELF binary | `carved/application_x-elf/` |
+| `dex` | `application/vnd.android.dex` | Android DEX | `carved/application_vnd.android.dex/` |
+| `class` | `application/java-vm` | Java class | `carved/application_java-vm/` |
+| `iso` | `application/x-iso9660-image` | ISO 9660 | `carved/application_x-iso9660-image/` |
+| `vmdk` | `application/x-vmdk` | VMware disk | `carved/application_x-vmdk/` |
+| `swf` | `application/x-shockwave-flash` | Shockwave Flash | `carved/application_x-shockwave-flash/` |
+| `gpx` | `application/gpx+xml` | GPS exchange | `carved/application_gpx+xml/` |
+
+Notes:
+- The **PhotoRec key** is the family identifier PhotoRec's `fileopt` command
+  toggles. The generated command enables *only* the ticked families:
+  `wholespace,fileopt,everything,disable,<key>,enable,…,search`.
+- The **output folder** is derived from the *detected* MIME of each carved file
+  (`java.nio.file.Files.probeContentType`, with the extension table above as a
+  fallback), so a file may land in a slightly different folder than its family
+  row if the OS detector disagrees. Unknown types go to
+  `carved/application_octet-stream/`.
+- PhotoRec's full signature set is ~480 families. Anything not listed here is
+  reachable via the **Advanced raw `/cmd` override** field.
 
 ---
 

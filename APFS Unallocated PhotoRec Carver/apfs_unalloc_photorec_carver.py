@@ -62,6 +62,7 @@ from javax.swing import JButton
 from javax.swing import JTextField
 from javax.swing import JFileChooser
 from javax.swing import JCheckBox
+from javax.swing import JScrollPane
 from javax.swing import BoxLayout
 from javax.swing import DefaultComboBoxModel
 from javax.swing import BorderFactory
@@ -103,18 +104,102 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.0.2"
+MODULE_VERSION = "1.1.0"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
 READ_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
 
-# Default PhotoRec search command fragment. The bin IS free space, so we use
-# "wholespace" (there is no live FS to compute free space from). "fileopt,
-# everything,enable" turns on all file families; "search" starts the carve.
-DEFAULT_PHOTOREC_CMD = "wholespace,fileopt,everything,enable,search"
-
 DEFAULT_MIME = "application/octet-stream"
+
+# ---------------------------------------------------------------------------
+# Supported PhotoRec file families exposed by this module.
+#
+# Each entry is (photorec_key, mime_type, description). photorec_key is the
+# family identifier PhotoRec's "fileopt" command toggles (the file_hint
+# extension, e.g. "wav", "jpg"). The command we build enables ONLY the selected
+# families -- nothing is carved by default except what the analyst asks for.
+#
+# The DEFAULT is WAV only (see DEFAULT_FAMILIES). PhotoRec's full signature set
+# is larger (~480 families); anything not listed here can still be driven via
+# the advanced raw-command override in the settings panel.
+# ---------------------------------------------------------------------------
+PHOTOREC_FAMILIES = [
+    # --- Audio ---
+    ("wav",   "audio/x-wav",                 "WAV / RIFF audio"),
+    ("mp3",   "audio/mpeg",                  "MP3 audio"),
+    ("ogg",   "audio/ogg",                   "Ogg Vorbis audio"),
+    ("flac",  "audio/flac",                  "FLAC lossless audio"),
+    ("au",    "audio/basic",                 "Sun/NeXT AU audio"),
+    ("mid",   "audio/midi",                  "MIDI"),
+    ("aac",   "audio/aac",                   "AAC audio"),
+    ("wma",   "audio/x-ms-wma",              "Windows Media Audio (ASF)"),
+    # --- Video ---
+    ("mov",   "video/quicktime",             "QuickTime / MP4 / 3GP (MOV family)"),
+    ("mp4",   "video/mp4",                   "MP4 video"),
+    ("avi",   "video/x-msvideo",             "AVI (RIFF video)"),
+    ("mkv",   "video/x-matroska",            "Matroska / WebM"),
+    ("mpg",   "video/mpeg",                  "MPEG program stream"),
+    ("asf",   "video/x-ms-asf",              "Windows Media Video (ASF)"),
+    ("flv",   "video/x-flv",                 "Flash video"),
+    # --- Images ---
+    ("jpg",   "image/jpeg",                  "JPEG image"),
+    ("png",   "image/png",                   "PNG image"),
+    ("gif",   "image/gif",                   "GIF image"),
+    ("bmp",   "image/bmp",                   "BMP image"),
+    ("tif",   "image/tiff",                  "TIFF image"),
+    ("ico",   "image/x-icon",                "Windows icon"),
+    ("psd",   "image/vnd.adobe.photoshop",   "Photoshop PSD"),
+    ("cr2",   "image/x-canon-cr2",           "Canon RAW (CR2)"),
+    ("nef",   "image/x-nikon-nef",           "Nikon RAW (NEF)"),
+    ("orf",   "image/x-olympus-orf",         "Olympus RAW (ORF)"),
+    ("raf",   "image/x-fuji-raf",            "Fujifilm RAW (RAF)"),
+    ("rw2",   "image/x-panasonic-rw2",       "Panasonic RAW (RW2)"),
+    ("heic",  "image/heic",                  "HEIF/HEIC image"),
+    ("webp",  "image/webp",                  "WebP image"),
+    # --- Documents ---
+    ("pdf",   "application/pdf",             "PDF document"),
+    ("doc",   "application/msword",          "MS Office OLE (doc/xls/ppt/msi)"),
+    ("rtf",   "application/rtf",             "Rich Text Format"),
+    ("txt",   "text/plain",                  "Plain text (and many text formats)"),
+    ("html",  "text/html",                   "HTML"),
+    ("xml",   "application/xml",             "XML"),
+    # --- Archives / compression ---
+    ("zip",   "application/zip",             "ZIP (also docx/xlsx/pptx/odt/epub/jar)"),
+    ("gz",    "application/gzip",            "gzip"),
+    ("bz2",   "application/x-bzip2",         "bzip2"),
+    ("7z",    "application/x-7z-compressed", "7-Zip"),
+    ("rar",   "application/vnd.rar",         "RAR"),
+    ("tar",   "application/x-tar",           "tar"),
+    ("xz",    "application/x-xz",            "xz"),
+    ("cab",   "application/vnd.ms-cab-compressed", "Microsoft Cabinet"),
+    # --- Databases ---
+    ("sqlite","application/x-sqlite3",       "SQLite database"),
+    ("mdb",   "application/x-msaccess",      "MS Access (MDB/ACCDB)"),
+    ("dbf",   "application/x-dbf",           "dBASE"),
+    # --- Email / PIM ---
+    ("pst",   "application/vnd.ms-outlook",  "Outlook PST/OST"),
+    ("evt",   "application/x-ms-evt",        "Windows Event Log (legacy)"),
+    ("evtx",  "application/x-ms-evtx",       "Windows Event Log (XML)"),
+    # --- Executables / system ---
+    ("exe",   "application/vnd.microsoft.portable-executable", "Windows PE"),
+    ("elf",   "application/x-elf",           "ELF binary"),
+    ("dex",   "application/vnd.android.dex", "Android DEX"),
+    ("class", "application/java-vm",         "Java class"),
+    # --- Disk / container images ---
+    ("iso",   "application/x-iso9660-image", "ISO 9660"),
+    ("vmdk",  "application/x-vmdk",          "VMware disk"),
+    # --- Misc ---
+    ("swf",   "application/x-shockwave-flash", "Shockwave Flash"),
+    ("gpx",   "application/gpx+xml",         "GPS exchange"),
+]
+
+# Convenience lookups derived once from the table above.
+PHOTOREC_FAMILY_KEYS = [fam[0] for fam in PHOTOREC_FAMILIES]
+PHOTOREC_FAMILY_MIME = dict((fam[0], fam[1]) for fam in PHOTOREC_FAMILIES)
+
+# Default is WAV only -- deliberately narrow, not "everything".
+DEFAULT_FAMILIES = ["wav"]
 
 
 # =============================================================================
@@ -258,6 +343,38 @@ def is_structural_content(content):
     return content_type_name(content) in STRUCTURAL_TYPE_NAMES
 
 
+def build_photorec_command(families):
+    """Build the PhotoRec /cmd tail that enables ONLY the given file families.
+
+    The bin IS free space, so we use "wholespace" (there is no live FS to
+    compute free space from). We disable everything, then enable exactly the
+    requested families, then "search" to start the carve. An empty/whitespace
+    selection falls back to the WAV default rather than carving nothing.
+
+    >>> build_photorec_command(["wav"])
+    'wholespace,fileopt,everything,disable,wav,enable,search'
+    >>> build_photorec_command(["jpg", "png"])
+    'wholespace,fileopt,everything,disable,jpg,enable,png,enable,search'
+    >>> build_photorec_command([])
+    'wholespace,fileopt,everything,disable,wav,enable,search'
+    """
+    fams = []
+    for fam in (families or []):
+        if fam is None:
+            continue
+        key = fam.strip()
+        if key and key not in fams:
+            fams.append(key)
+    if not fams:
+        fams = ["wav"]
+    parts = ["wholespace", "fileopt", "everything", "disable"]
+    for key in fams:
+        parts.append(key)
+        parts.append("enable")
+    parts.append("search")
+    return ",".join(parts)
+
+
 # =============================================================================
 # Factory
 # =============================================================================
@@ -310,8 +427,11 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
         self.selected_volume_label = "(container-wide)"
         # Path to photorec_win.exe.
         self.photorec_path = ""
-        # PhotoRec file-family / search command fragment.
-        self.photorec_cmd = DEFAULT_PHOTOREC_CMD
+        # PhotoRec file families to carve. Default: WAV only.
+        self.selected_families = list(DEFAULT_FAMILIES)
+        # Advanced: if non-empty, this raw /cmd tail is used verbatim and the
+        # family selection above is ignored. Empty => build from families.
+        self.raw_command_override = ""
         # Optionally register carved files as derived files in the case.
         self.add_derived_files = False
 
@@ -335,12 +455,28 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
     def setPhotorecPath(self, path):
         self.photorec_path = path
 
-    def getPhotorecCmd(self):
-        cmd = getattr(self, "photorec_cmd", DEFAULT_PHOTOREC_CMD)
-        return cmd if cmd else DEFAULT_PHOTOREC_CMD
+    def getSelectedFamilies(self):
+        fams = getattr(self, "selected_families", None)
+        if not fams:
+            return list(DEFAULT_FAMILIES)
+        return list(fams)
 
-    def setPhotorecCmd(self, cmd):
-        self.photorec_cmd = cmd
+    def setSelectedFamilies(self, families):
+        self.selected_families = list(families) if families else list(DEFAULT_FAMILIES)
+
+    def getRawCommandOverride(self):
+        return getattr(self, "raw_command_override", "")
+
+    def setRawCommandOverride(self, cmd):
+        self.raw_command_override = cmd if cmd else ""
+
+    def getPhotorecCmd(self):
+        """The /cmd tail passed to PhotoRec: the raw override if set, else a
+        command built from the selected families (default WAV only)."""
+        override = getattr(self, "raw_command_override", "")
+        if override and override.strip():
+            return override.strip()
+        return build_photorec_command(self.getSelectedFamilies())
 
     def getAddDerivedFiles(self):
         return getattr(self, "add_derived_files", False)
@@ -427,8 +563,32 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self.add(self.browseButton)
         self.add(JLabel(" "))
 
-        # PhotoRec command fragment.
-        self.add(JLabel("PhotoRec command (file families / search):"))
+        # File families to carve (default: WAV only).
+        self.add(JLabel("<html>File types to carve "
+                        "(<b>default: WAV only</b>). Each maps to a MIME "
+                        "folder in the output:</html>"))
+        familiesPanel = JPanel()
+        familiesPanel.setLayout(BoxLayout(familiesPanel, BoxLayout.Y_AXIS))
+        self.family_checks = {}   # photorec_key -> JCheckBox
+        for key, mime, desc in PHOTOREC_FAMILIES:
+            cb = JCheckBox("%s  -  %s  (%s)" % (key, desc, mime))
+            self.family_checks[key] = cb
+            familiesPanel.add(cb)
+        scroll = JScrollPane(familiesPanel)
+        scroll.setPreferredSize(Dimension(560, 200))
+        scroll.setMaximumSize(Dimension(600, 220))
+        self.add(scroll)
+        self.selectAllButton = JButton("Select all",
+                                       actionPerformed=self.onSelectAll)
+        self.selectNoneButton = JButton("Select none (WAV default)",
+                                        actionPerformed=self.onSelectNone)
+        self.add(self.selectAllButton)
+        self.add(self.selectNoneButton)
+        self.add(JLabel(" "))
+
+        # Advanced raw command override (blank = build from the checkboxes).
+        self.add(JLabel("<html><b>Advanced:</b> raw PhotoRec /cmd override "
+                        "(blank = use the selection above):</html>"))
         self.cmdField = JTextField(40)
         self.cmdField.setMaximumSize(Dimension(600, 28))
         self.add(self.cmdField)
@@ -467,8 +627,13 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
 
         # Restore other fields.
         self.photorecField.setText(self.local_settings.getPhotorecPath())
-        self.cmdField.setText(self.local_settings.getPhotorecCmd())
+        self.cmdField.setText(self.local_settings.getRawCommandOverride())
         self.derivedCheck.setSelected(self.local_settings.getAddDerivedFiles())
+
+        # Restore family checkboxes (default WAV only).
+        selected = set(self.local_settings.getSelectedFamilies())
+        for key, cb in self.family_checks.items():
+            cb.setSelected(key in selected)
 
         # Persist text fields on focus changes / typing via document listeners
         # is overkill here; we read them in the event handlers and on the
@@ -498,13 +663,33 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self.local_settings.setAddDerivedFiles(self.derivedCheck.isSelected())
         self._capture_text_fields()
 
+    def onSelectAll(self, event):
+        for cb in self.family_checks.values():
+            cb.setSelected(True)
+        self._capture_families()
+
+    def onSelectNone(self, event):
+        # "None" means fall back to the WAV-only default, never an empty carve.
+        for key, cb in self.family_checks.items():
+            cb.setSelected(key in DEFAULT_FAMILIES)
+        self._capture_families()
+
+    def _selected_families(self):
+        # Preserve the table order for stable, readable commands.
+        return [key for key, mime, desc in PHOTOREC_FAMILIES
+                if self.family_checks[key].isSelected()]
+
+    def _capture_families(self):
+        self.local_settings.setSelectedFamilies(self._selected_families())
+
     def _capture_text_fields(self):
         self.local_settings.setPhotorecPath(self.photorecField.getText())
-        self.local_settings.setPhotorecCmd(self.cmdField.getText())
+        self.local_settings.setRawCommandOverride(self.cmdField.getText())
 
     def getSettings(self):
         # Autopsy calls this to persist the panel's settings.
         self._capture_text_fields()
+        self._capture_families()
         idx = self.volumeCombo.getSelectedIndex()
         if 0 <= idx < len(self._volume_ids):
             self.local_settings.setSelectedVolume(
@@ -1025,6 +1210,18 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                     (carved_total,))
         html.append("<tr><td>Manifest (CSV)</td><td>%s</td></tr>" %
                     (self._html(manifest_path),))
+        try:
+            fams = ", ".join(self.local_settings.getSelectedFamilies())
+        except Exception:
+            fams = "(unknown)"
+        try:
+            cmd_used = self.local_settings.getPhotorecCmd()
+        except Exception:
+            cmd_used = "(unknown)"
+        html.append("<tr><td>File families carved</td><td>%s</td></tr>" %
+                    (self._html(fams),))
+        html.append("<tr><td>PhotoRec command</td><td><code>%s</code></td></tr>" %
+                    (self._html(cmd_used),))
         html.append("</table>")
         html.append("<p>Carved files are organized under <code>carved/&lt;mime&gt;"
                     "</code> folders. Every PhotoRec log is preserved under "
@@ -1067,21 +1264,19 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             return "?"
 
 
-# Minimal extension->MIME hints used only as a secondary fallback when
-# Files.probeContentType returns null. PhotoRec assigns signature-based
-# extensions, so these are usually correct.
-EXT_MIME_HINTS = {
-    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-    "gif": "image/gif", "bmp": "image/bmp", "tif": "image/tiff",
-    "tiff": "image/tiff", "pdf": "application/pdf", "zip": "application/zip",
-    "gz": "application/gzip", "doc": "application/msword",
+# Extension->MIME hints used only as a secondary fallback when
+# Files.probeContentType returns null. PhotoRec names carved files with the
+# family key as the extension, so the family table itself is the primary
+# source; a few extra extension aliases are added for formats PhotoRec may
+# emit under a different extension.
+EXT_MIME_HINTS = dict(PHOTOREC_FAMILY_MIME)
+EXT_MIME_HINTS.update({
+    "jpeg": "image/jpeg", "tiff": "image/tiff", "htm": "text/html",
+    "db": "application/x-sqlite3", "sqlite3": "application/x-sqlite3",
     "docx": ("application/vnd.openxmlformats-officedocument."
              "wordprocessingml.document"),
-    "xls": "application/vnd.ms-excel",
     "xlsx": ("application/vnd.openxmlformats-officedocument."
              "spreadsheetml.sheet"),
-    "txt": "text/plain", "html": "text/html", "htm": "text/html",
-    "xml": "application/xml", "mov": "video/quicktime", "mp4": "video/mp4",
-    "avi": "video/x-msvideo", "mp3": "audio/mpeg", "wav": "audio/x-wav",
-    "sqlite": "application/x-sqlite3", "db": "application/x-sqlite3",
-}
+    "xls": "application/vnd.ms-excel", "3gp": "video/3gpp",
+    "qt": "video/quicktime", "m4a": "audio/mp4",
+})

@@ -25,6 +25,7 @@ HELPERS = [
     "manifest_header",
     "content_type_name",
     "is_structural_content",
+    "build_photorec_command",
 ]
 
 # Constants the helpers reference at module scope.
@@ -153,6 +154,25 @@ def run():
     eq(h["is_structural_content"](_FakeContent("LayoutFile")), False,
        "LayoutFile NOT structural")
     checks += 11
+
+    # build_photorec_command — default is WAV only; enables ONLY selection.
+    eq(h["build_photorec_command"](["wav"]),
+       "wholespace,fileopt,everything,disable,wav,enable,search", "cmd wav")
+    eq(h["build_photorec_command"]([]),
+       "wholespace,fileopt,everything,disable,wav,enable,search", "cmd empty->wav")
+    eq(h["build_photorec_command"](None),
+       "wholespace,fileopt,everything,disable,wav,enable,search", "cmd None->wav")
+    eq(h["build_photorec_command"](["jpg", "png"]),
+       "wholespace,fileopt,everything,disable,jpg,enable,png,enable,search",
+       "cmd multi")
+    # dedupe + whitespace-trim + drop empties.
+    eq(h["build_photorec_command"]([" jpg ", "jpg", "", None, "png"]),
+       "wholespace,fileopt,everything,disable,jpg,enable,png,enable,search",
+       "cmd dedup/trim")
+    # never carves "everything" implicitly.
+    if "everything,enable" in h["build_photorec_command"](["wav"]):
+        raise AssertionError("cmd must not enable everything by default")
+    checks += 6
 
     print("OK - %d assertions passed across %d helpers" %
           (checks, len(HELPERS)))
