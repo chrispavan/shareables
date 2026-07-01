@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.2.0"
+MODULE_VERSION = "1.2.1"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -1056,10 +1056,26 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         # photorec_win.exe /log /d <recup_prefix> /cmd "<bin>" <cmd>
         args = [photorec, "/log", "/d", recup_prefix, "/cmd", bin_path, cmd]
         self.log(Level.INFO, "Running PhotoRec: %s" % (" ".join(args),))
+        work = os.path.dirname(recup_prefix)
         pb = ProcessBuilder(args)
         # Run with cwd = the bin's work dir so photorec.log lands there.
-        pb.directory(File(os.path.dirname(recup_prefix)))
+        pb.directory(File(work))
         pb.redirectErrorStream(True)
+        # CRITICAL: drain PhotoRec's console output to a file. PhotoRec is a
+        # console app that prints progress to stdout; ExecUtil does NOT read the
+        # process streams, so if we leave stdout as a pipe it fills after a few
+        # KB, PhotoRec blocks on write, and ExecUtil waits forever -> a hang
+        # with no CPU/disk activity. Redirecting to a file keeps it flowing.
+        console_log = os.path.join(work, "photorec_console.log")
+        pb.redirectOutput(File(console_log))
+        # Feed EOF on stdin (an empty file) so that if PhotoRec ever expects
+        # interactive input it gets EOF and exits rather than blocking.
+        empty_in = os.path.join(work, "photorec_stdin.empty")
+        try:
+            File(empty_in).createNewFile()
+            pb.redirectInput(File(empty_in))
+        except Exception:
+            pass
         # ExecUtil.execute(ProcessBuilder, ProcessTerminator) -> int exit code.
         # DataSourceIngestModuleProcessTerminator(context) (from the .ingest
         # package) ties process lifetime to data-source ingest cancellation.
