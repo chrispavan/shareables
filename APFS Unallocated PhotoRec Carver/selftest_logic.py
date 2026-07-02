@@ -155,24 +155,32 @@ def run():
        "LayoutFile NOT structural")
     checks += 11
 
-    # build_photorec_command — default is WAV only; enables ONLY selection.
+    # build_photorec_command — default WAV only; raw (partition_none) whole
+    # space; enables ONLY the selection.
     eq(h["build_photorec_command"](["wav"]),
-       "wholespace,fileopt,everything,disable,wav,enable,search", "cmd wav")
+       "partition_none,fileopt,everything,disable,wav,enable,wholespace,search",
+       "cmd wav")
     eq(h["build_photorec_command"]([]),
-       "wholespace,fileopt,everything,disable,wav,enable,search", "cmd empty->wav")
+       "partition_none,fileopt,everything,disable,wav,enable,wholespace,search",
+       "cmd empty->wav")
     eq(h["build_photorec_command"](None),
-       "wholespace,fileopt,everything,disable,wav,enable,search", "cmd None->wav")
+       "partition_none,fileopt,everything,disable,wav,enable,wholespace,search",
+       "cmd None->wav")
     eq(h["build_photorec_command"](["jpg", "png"]),
-       "wholespace,fileopt,everything,disable,jpg,enable,png,enable,search",
-       "cmd multi")
+       "partition_none,fileopt,everything,disable,jpg,enable,png,enable,"
+       "wholespace,search", "cmd multi")
     # dedupe + whitespace-trim + drop empties.
     eq(h["build_photorec_command"]([" jpg ", "jpg", "", None, "png"]),
-       "wholespace,fileopt,everything,disable,jpg,enable,png,enable,search",
-       "cmd dedup/trim")
+       "partition_none,fileopt,everything,disable,jpg,enable,png,enable,"
+       "wholespace,search", "cmd dedup/trim")
+    cmd_wav = h["build_photorec_command"](["wav"])
     # never carves "everything" implicitly.
-    if "everything,enable" in h["build_photorec_command"](["wav"]):
+    if "everything,enable" in cmd_wav:
         raise AssertionError("cmd must not enable everything by default")
-    checks += 6
+    # raw, non-partitioned treatment must be present.
+    if "partition_none" not in cmd_wav:
+        raise AssertionError("cmd must treat bin as non-partitioned raw media")
+    checks += 7
 
     print("OK - %d assertions passed across %d helpers" %
           (checks, len(HELPERS)))

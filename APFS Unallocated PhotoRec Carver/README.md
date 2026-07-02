@@ -98,9 +98,13 @@ modules folder.)
      Use *Select all* / *Select none (WAV default)* for the extremes.
    - **Advanced: raw PhotoRec `/cmd` override** — blank by default. If you type
      a raw command tail here it is used verbatim and the checklist is ignored
-     (this reaches PhotoRec's full ~480-family signature set). The module always
-     uses `wholespace` because a bin *is* free space; a selection of families
-     builds `wholespace,fileopt,everything,disable,<fam>,enable,…,search`.
+     (this reaches PhotoRec's full ~480-family signature set). Otherwise a
+     selection of families builds
+     `partition_none,fileopt,everything,disable,<fam>,enable,wholespace,search`.
+     `partition_none` treats each bin as **non-partitioned raw media** so
+     PhotoRec doesn't false-detect a partition table / filesystem in the raw
+     unallocated data; `wholespace` carves the whole bin (a bin *is* free
+     space, so there is no live FS free-space map to use).
    - **Register carved files as derived files** — optional; off by default.
 4. Start ingest. Watch the **Ingest Inbox** for progress and the final summary,
    and open the report from the **Reports** tree.
@@ -179,11 +183,13 @@ named from its detected MIME type. The families the checklist exposes:
 
 Notes:
 - The **PhotoRec key** is the family identifier PhotoRec's `fileopt` command
-  toggles. The generated command enables *only* the ticked families:
-  `wholespace,fileopt,everything,disable,<key>,enable,…,search`.
-- The **output folder** is derived from the *detected* MIME of each carved file
-  (`java.nio.file.Files.probeContentType`, with the extension table above as a
-  fallback), so a file may land in a slightly different folder than its family
+  toggles. The generated command enables *only* the ticked families and treats
+  the bin as raw, non-partitioned media:
+  `partition_none,fileopt,everything,disable,<key>,enable,wholespace,search`.
+- The **output folder** is derived from each carved file's extension→MIME (the
+  table above; PhotoRec names files by signature) and only falls back to
+  `java.nio.file.Files.probeContentType` for unknown extensions, so a file may
+  land in a slightly different folder than its family
   row if the OS detector disagrees. Unknown types go to
   `carved/application_octet-stream/`.
 - PhotoRec's full signature set is ~480 families. Anything not listed here is

@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.2.2"
+MODULE_VERSION = "1.3.0"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -354,17 +354,22 @@ def is_structural_content(content):
 def build_photorec_command(families):
     """Build the PhotoRec /cmd tail that enables ONLY the given file families.
 
-    The bin IS free space, so we use "wholespace" (there is no live FS to
-    compute free space from). We disable everything, then enable exactly the
-    requested families, then "search" to start the carve. An empty/whitespace
-    selection falls back to the WAV default rather than carving nothing.
+    An unallocated bin is RAW free space, not a partitioned disk. We therefore:
+      * "partition_none" -- treat the bin as non-partitioned raw media so
+        PhotoRec does NOT try to parse a partition table / filesystem out of it.
+        Random free-space bytes frequently match partition/FS signatures, which
+        otherwise triggers false filesystem detection and a wrong block size.
+      * "wholespace" -- extract from the whole space (there is no live FS to
+        compute a free-space map from).
+    We disable every family, enable exactly the requested ones, then "search".
+    An empty/whitespace selection falls back to the WAV default.
 
     >>> build_photorec_command(["wav"])
-    'wholespace,fileopt,everything,disable,wav,enable,search'
+    'partition_none,fileopt,everything,disable,wav,enable,wholespace,search'
     >>> build_photorec_command(["jpg", "png"])
-    'wholespace,fileopt,everything,disable,jpg,enable,png,enable,search'
+    'partition_none,fileopt,everything,disable,jpg,enable,png,enable,wholespace,search'
     >>> build_photorec_command([])
-    'wholespace,fileopt,everything,disable,wav,enable,search'
+    'partition_none,fileopt,everything,disable,wav,enable,wholespace,search'
     """
     fams = []
     for fam in (families or []):
@@ -375,10 +380,11 @@ def build_photorec_command(families):
             fams.append(key)
     if not fams:
         fams = ["wav"]
-    parts = ["wholespace", "fileopt", "everything", "disable"]
+    parts = ["partition_none", "fileopt", "everything", "disable"]
     for key in fams:
         parts.append(key)
         parts.append("enable")
+    parts.append("wholespace")
     parts.append("search")
     return ",".join(parts)
 
