@@ -1,10 +1,12 @@
 # APFS Unallocated PhotoRec Carver (Autopsy Jython module)
 
-An Autopsy **Data Source Ingest Module** that extracts the unallocated space of
-an APFS data source as one `.bin` file **per contiguous run** of unallocated
-blocks, runs **PhotoRec** on each bin individually, and sorts the carved output
-into folders **by MIME type**. Results are surfaced in the case as ingest inbox
-messages and an HTML report, with SHA-256/MD5 hashing and a manifest CSV.
+An Autopsy **Data Source Ingest Module** that extracts the pool/container-level
+unallocated space of an APFS data source, carves it with **PhotoRec**, and sorts
+the recovered files into folders **by MIME type**. Contiguous unallocated runs
+are **concatenated into size-capped batch bins** (default 1 GB) so PhotoRec is
+invoked once per batch rather than once per run — far fewer, faster calls.
+Results are surfaced in the case as ingest inbox messages and an HTML report,
+with SHA-256/MD5 hashing and provenance manifests.
 
 > ### ⚠️ Read this first: carving is CONTAINER-LEVEL, not per-volume
 > APFS frees blocks at the **container / pool** level, not per volume. The
@@ -35,10 +37,25 @@ Under the case module directory:
 │   └── ...
 ├── photorec_logs/              # every photorec.log, preserved
 │   └── <binbase>.photorec.log
-├── manifest.csv                # source_bin, carved_file, mime, sha256
-├── bins_manifest.csv           # bin_name, byte_start, byte_len, md5, sha256
+├── manifest.csv                # source_bin(=batch), carved_file, mime, sha256
+├── bins_manifest.csv           # bin_name, range_count, total_bytes, md5, sha256  (one row per batch)
+├── batch_ranges.csv            # bin_name, layout_file_id, byte_start, byte_len  (one row per original run)
 └── APFS_Unalloc_Carve_Report.html
 ```
+
+### Batching (fewer PhotoRec calls = much faster)
+
+An APFS container has many small unallocated runs, and PhotoRec's fixed
+per-invocation startup dwarfs the carve of a tiny run. So consecutive runs are
+**concatenated into one "batch bin" up to a configurable size (default 1 GB)
+and carved with a single PhotoRec call.** This turns thousands of invocations
+into a handful. Concatenation also matches how PhotoRec natively scans free
+space (as a stream), so files fragmented across runs can still be recovered.
+
+Provenance is fully preserved: `bins_manifest.csv` lists each batch bin and its
+hash, and `batch_ranges.csv` maps every original unallocated run to the batch
+it was carved in. A single run larger than the batch size is never split — it
+gets its own batch.
 
 `carved/<mime_top>_<subtype>/` — e.g. `image_jpeg`, `application_pdf`,
 `application_octet-stream`. Carved file names are prefixed with their source
@@ -77,7 +94,7 @@ This module uses **only Java APIs through Jython** for native work (no
 ## Install
 
 The distribution zip's top folder is **version-stamped**
-(`APFS_Unalloc_PhotoRec_Carver_v1_4_2`). Installing each release into its own
+(`APFS_Unalloc_PhotoRec_Carver_v1_5_0`). Installing each release into its own
 folder is deliberate: a new folder name forces Jython to compile the module
 fresh and makes it impossible for a stale cached `…$py.class` from a previous
 version to keep running (the #1 cause of "my fix didn't take effect").
@@ -90,14 +107,14 @@ version to keep running (the #1 cause of "my fix didn't take effect").
    `python_modules\` — do not rename it and do not nest it.
 4. Restart Autopsy.
 5. In the ingest-module list, confirm the entry reads
-   **"APFS Unalloc PhotoRec Carver v1.4.2"**. The version in the name tells you
+   **"APFS Unalloc PhotoRec Carver v1.5.0"**. The version in the name tells you
    exactly which build is loaded; if it doesn't match, the new folder isn't
    being picked up.
 
 Full install path:
 
 ```
-%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver_v1_4_2\apfs_unalloc_photorec_carver.py
+%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver_v1_5_0\apfs_unalloc_photorec_carver.py
 ```
 
 (`selftest_logic.py` is a developer test — do **not** copy it into the Autopsy
@@ -138,6 +155,10 @@ modules folder.)
    - **Register carved files as derived files** — optional; off by default.
    - **Keep extracted .bin files after carving** — optional; **off by default**
      (bins are deleted as carving proceeds to save disk; see *Cleanup* above).
+   - **Batch size (MB)** — default **1024 (1 GB)**. Consecutive unallocated runs
+     are concatenated up to this size and carved with one PhotoRec call. Larger
+     = fewer calls / faster, but more peak disk per batch (cleanup is per
+     batch). See *Batching* above.
 4. Start ingest. Watch the **Ingest Inbox** for progress and the final summary,
    and open the report from the **Reports** tree.
 

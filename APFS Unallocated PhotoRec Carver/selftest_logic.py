@@ -26,6 +26,8 @@ HELPERS = [
     "content_type_name",
     "is_structural_content",
     "build_photorec_command",
+    "plan_batches",
+    "batch_bin_name",
 ]
 
 # Constants the helpers reference at module scope.
@@ -173,6 +175,27 @@ def run():
     if not EXPECTED_CMD.endswith(",search"):
         raise AssertionError("search must be the final token")
     checks += 7
+
+    # plan_batches: group consecutive runs into size-capped batches so PhotoRec
+    # is called once per batch, never splitting a single run.
+    eq(h["plan_batches"]([10, 10, 10], 25), [(0, 2), (2, 3)], "batch basic")
+    eq(h["plan_batches"]([100], 25), [(0, 1)], "batch oversize-single")
+    eq(h["plan_batches"]([30, 10], 25), [(0, 1), (1, 2)], "batch big-first")
+    eq(h["plan_batches"]([], 25), [], "batch empty")
+    eq(h["plan_batches"]([5, 5, 5, 5], 100), [(0, 4)], "batch all-in-one")
+    eq(h["plan_batches"]([20, 20, 20], 40), [(0, 2), (2, 3)], "batch pairs")
+    # every run must be covered exactly once, in order.
+    plan = h["plan_batches"]([7, 3, 9, 1, 40, 2], 10)
+    covered = []
+    for (a, b) in plan:
+        covered.extend(range(a, b))
+    eq(covered, [0, 1, 2, 3, 4, 5], "batch covers all runs once, in order")
+    checks += 7
+
+    # batch_bin_name
+    eq(h["batch_bin_name"](1, 42, 1048576),
+       "unalloc_batch_0001_runs42_len1048576.bin", "batch name")
+    checks += 1
 
     print("OK - %d assertions passed across %d helpers" %
           (checks, len(HELPERS)))

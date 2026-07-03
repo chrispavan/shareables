@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.4.2"
+MODULE_VERSION = "1.5.0"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -236,6 +236,39 @@ def range_file_offsets(ordered_lengths):
     return offsets
 
 
+def plan_batches(sizes, batch_size):
+    """Group consecutive runs into batches whose summed size stays <=
+    batch_size, so PhotoRec is invoked once per batch instead of once per run.
+    A single run larger than batch_size gets its own batch (never split).
+    Returns a list of (start_index, end_index) pairs, end exclusive.
+
+    >>> plan_batches([10, 10, 10], 25)
+    [(0, 2), (2, 3)]
+    >>> plan_batches([100], 25)
+    [(0, 1)]
+    >>> plan_batches([30, 10], 25)
+    [(0, 1), (1, 2)]
+    >>> plan_batches([], 25)
+    []
+    >>> plan_batches([5, 5, 5, 5], 100)
+    [(0, 4)]
+    """
+    batches = []
+    n = len(sizes)
+    i = 0
+    while i < n:
+        start = i
+        total = 0
+        while i < n:
+            s = int(sizes[i])
+            if i > start and total + s > batch_size:
+                break
+            total += s
+            i += 1
+        batches.append((start, i))
+    return batches
+
+
 def bin_name(layout_file_id, byte_start, byte_len):
     """Name for the .bin holding one contiguous unallocated run.
 
@@ -243,6 +276,16 @@ def bin_name(layout_file_id, byte_start, byte_len):
     'unalloc_7_off1048576_len4096.bin'
     """
     return "unalloc_%s_off%s_len%s.bin" % (layout_file_id, byte_start, byte_len)
+
+
+def batch_bin_name(batch_index, range_count, total_len):
+    """Name for a batch .bin that concatenates several unallocated runs.
+
+    >>> batch_bin_name(1, 42, 1048576)
+    'unalloc_batch_0001_runs42_len1048576.bin'
+    """
+    return "unalloc_batch_%04d_runs%s_len%s.bin" % (
+        batch_index, range_count, total_len)
 
 
 def mime_to_folder(mime):
@@ -446,6 +489,11 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
         # unallocated space (their hashes are still recorded in
         # bins_manifest.csv).
         self.keep_bins = False
+        # Batch size (MB): consecutive unallocated runs are concatenated into
+        # one bin up to this size and carved with a SINGLE PhotoRec call, so we
+        # invoke PhotoRec far fewer times (its per-run startup overhead was the
+        # bottleneck). Larger = fewer calls/faster but more peak disk per batch.
+        self.batch_size_mb = 1024
 
     def getVersionNumber(self):
         return self.serialVersionUID
@@ -501,6 +549,28 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
 
     def setKeepBins(self, flag):
         self.keep_bins = bool(flag)
+
+    def getBatchSizeMB(self):
+        mb = getattr(self, "batch_size_mb", 1024)
+        try:
+            mb = int(mb)
+        except Exception:
+            mb = 1024
+        if mb < 1:
+            mb = 1
+        return mb
+
+    def setBatchSizeMB(self, mb):
+        try:
+            mb = int(mb)
+        except Exception:
+            mb = 1024
+        if mb < 1:
+            mb = 1
+        self.batch_size_mb = mb
+
+    def getBatchSizeBytes(self):
+        return long(self.getBatchSizeMB()) * 1024 * 1024
 
 
 # =============================================================================
@@ -645,6 +715,15 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
             actionPerformed=self.onKeepBinsToggle)
         self._grid_add(self.keepBinsCheck, top=2)
 
+        # Batch size: consecutive runs are concatenated into one bin up to this
+        # size and carved with ONE PhotoRec call (fewer invocations = faster).
+        self._grid_add(JLabel("<html>Batch size (MB): concatenate runs up to "
+                              "this size per PhotoRec call. Larger = fewer "
+                              "calls/faster, more peak disk.</html>"), top=10)
+        self.batchField = JTextField(10)
+        self.batchField.setMaximumSize(Dimension(160, 28))
+        self._grid_add(self.batchField, fill=GridBagConstraints.NONE)
+
     def customizeComponents(self):
         # Populate volume combo.
         model = DefaultComboBoxModel()
@@ -675,6 +754,7 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self.cmdField.setText(self.local_settings.getRawCommandOverride())
         self.derivedCheck.setSelected(self.local_settings.getAddDerivedFiles())
         self.keepBinsCheck.setSelected(self.local_settings.getKeepBins())
+        self.batchField.setText(str(self.local_settings.getBatchSizeMB()))
 
         # Restore family checkboxes (default WAV only).
         selected = set(self.local_settings.getSelectedFamilies())
@@ -735,6 +815,7 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
     def _capture_text_fields(self):
         self.local_settings.setPhotorecPath(self.photorecField.getText())
         self.local_settings.setRawCommandOverride(self.cmdField.getText())
+        self.local_settings.setBatchSizeMB(self.batchField.getText())
 
     def getSettings(self):
         # Autopsy calls this to persist the panel's settings.
@@ -932,29 +1013,15 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         manifest_path = os.path.join(ds_dir, "manifest.csv")
         manifest_rows = []
         bins_manifest_path = os.path.join(ds_dir, "bins_manifest.csv")
-        self._bin_records = []  # [name, byte_start, byte_len, md5, sha256]
+        batch_ranges_path = os.path.join(ds_dir, "batch_ranges.csv")
+        self._bin_records = []    # per batch: [name, range_count, total, md5, sha256]
+        self._range_records = []  # per run: [batch_name, lf_id, byte_start, byte_len]
 
-        # 3. Count total ranges for a deterministic progress bar.
-        total_ranges = 0
+        # 3. Gather EVERY unallocated run across all layout files into a flat
+        #    list of (lf, lf_id, file_offset, byte_start, byte_len). PhotoRec is
+        #    then invoked once per BATCH of concatenated runs, not once per run.
+        runs = []
         for lf in layout_files:
-            try:
-                total_ranges = total_ranges + len(list(lf.getRanges()))
-            except Exception:
-                self.log(Level.WARNING,
-                         "Could not read ranges for layout file id=%s" %
-                         (self._safe_id(lf),))
-        if total_ranges <= 0:
-            total_ranges = 1
-        progressBar.switchToDeterminate(total_ranges)
-
-        carved_total = 0
-        bins_written = 0
-        done_units = 0
-
-        # 4. Per layout file -> per range: extract bin, carve, sort.
-        for lf in layout_files:
-            if self.context.dataSourceIngestIsCancelled():
-                break
             try:
                 ranges = list(lf.getRanges())
             except Exception:
@@ -962,33 +1029,60 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                          "Skipping layout file id=%s (getRanges failed): %s" %
                          (self._safe_id(lf), traceback.format_exc()))
                 continue
-
-            # Order ranges by sequence and compute file-relative offsets.
             try:
                 ranges_sorted = sorted(ranges, key=lambda r: r.getSequence())
             except Exception:
                 ranges_sorted = ranges
             lengths = [r.getByteLen() for r in ranges_sorted]
             file_offsets = range_file_offsets(lengths)
-
             lf_id = self._safe_id(lf)
-
             for idx, rng in enumerate(ranges_sorted):
-                if self.context.dataSourceIngestIsCancelled():
-                    break
                 try:
-                    self._process_one_range(
-                        lf, lf_id, rng, file_offsets[idx],
-                        bins_dir, carved_dir, work_dir, logs_dir,
-                        manifest_rows)
-                    bins_written = bins_written + 1
+                    runs.append((lf, lf_id, file_offsets[idx],
+                                 rng.getByteStart(), rng.getByteLen()))
                 except Exception:
-                    # One bad run must not abort the whole job.
                     self.log(Level.WARNING,
-                             "Range carve failed (layout id=%s seq=%s): %s" %
+                             "Bad range (layout id=%s seq=%s): %s" %
                              (lf_id, self._safe_seq(rng), traceback.format_exc()))
-                done_units = done_units + 1
-                progressBar.progress(min(done_units, total_ranges))
+
+        if not runs:
+            self.log(Level.WARNING, "No unallocated runs to carve.")
+            self._post(IngestMessage.MessageType.WARNING,
+                       "No unallocated runs", "Layout files exposed no ranges.")
+            return ProcessResult.OK
+
+        # 4. Plan batches (size-capped) and carve one PhotoRec pass per batch.
+        run_sizes = [r[4] for r in runs]
+        total_bytes = long(sum(int(s) for s in run_sizes))
+        batch_size = self.local_settings.getBatchSizeBytes()
+        batch_plan = plan_batches(run_sizes, batch_size)
+        self.log(Level.INFO,
+                 "Planning %s PhotoRec call(s) for %s run(s), %s bytes, "
+                 "batch<=%s MB" %
+                 (len(batch_plan), len(runs), total_bytes,
+                  self.local_settings.getBatchSizeMB()))
+        self._post(IngestMessage.MessageType.INFO, "APFS unalloc carving",
+                   "Carving %s unallocated runs in %s PhotoRec batch(es)." %
+                   (len(runs), len(batch_plan)))
+
+        progressBar.switchToDeterminate(max(len(batch_plan), 1))
+
+        bins_written = 0
+        for bi, (start, end) in enumerate(batch_plan):
+            if self.context.dataSourceIngestIsCancelled():
+                break
+            batch = runs[start:end]
+            try:
+                self._process_one_batch(
+                    bi + 1, batch, bins_dir, carved_dir, work_dir, logs_dir,
+                    manifest_rows)
+                bins_written = bins_written + 1
+            except Exception:
+                # One bad batch must not abort the whole job.
+                self.log(Level.WARNING,
+                         "Batch %s carve failed: %s" %
+                         (bi + 1, traceback.format_exc()))
+            progressBar.progress(min(bi + 1, len(batch_plan)))
 
         carved_total = len(manifest_rows)
 
@@ -999,12 +1093,15 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             self.log(Level.WARNING,
                      "Failed writing manifest: %s" % (traceback.format_exc(),))
 
-        # Bin provenance manifest (survives deletion of the .bin files).
+        # Batch provenance manifests (survive deletion of the .bin files):
+        # one row per batch bin (with its hash) and one row per original run
+        # mapping it to the batch it was carved in.
         try:
             self._write_bins_manifest(bins_manifest_path)
+            self._write_batch_ranges(batch_ranges_path)
         except Exception:
             self.log(Level.WARNING,
-                     "Failed writing bins manifest: %s" %
+                     "Failed writing provenance manifests: %s" %
                      (traceback.format_exc(),))
 
         # Remove the now-empty work/ scratch tree (per-bin dirs were deleted as
@@ -1030,94 +1127,102 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                      "Failed writing report: %s" % (traceback.format_exc(),))
 
         summary = ("APFS container-wide unallocated carving complete. "
-                   "Bins written: %s. Carved files: %s. Output: %s" %
+                   "PhotoRec batches: %s. Carved files kept: %s. Output: %s" %
                    (bins_written, carved_total, carved_dir))
         self.log(Level.INFO, summary)
         self._post(IngestMessage.MessageType.INFO,
                    "APFS unalloc carving complete", summary)
         return ProcessResult.OK
 
-    # ----- per-range work --------------------------------------------------
-    def _process_one_range(self, lf, lf_id, rng, file_offset,
-                           bins_dir, carved_dir, work_dir, logs_dir,
-                           manifest_rows):
-        byte_start = rng.getByteStart()
-        byte_len = rng.getByteLen()
-        name = bin_name(lf_id, byte_start, byte_len)
+    # ----- per-batch work --------------------------------------------------
+    def _process_one_batch(self, batch_index, batch, bins_dir, carved_dir,
+                           work_dir, logs_dir, manifest_rows):
+        """Concatenate the runs in `batch` into ONE bin, carve it with a single
+        PhotoRec call, sort the output, and clean up. `batch` is a list of
+        (lf, lf_id, file_offset, byte_start, byte_len)."""
+        range_count = len(batch)
+        total_len = sum(int(r[4]) for r in batch)
+        name = batch_bin_name(batch_index, range_count, total_len)
         bin_path = os.path.join(bins_dir, name)
-        bin_base = name[:-4] if name.endswith(".bin") else name  # drop .bin
+        bin_base = name[:-4] if name.endswith(".bin") else name
 
-        # Extract this run into a .bin, hashing as we go (single pass).
-        md5_hex, sha256_hex = self._extract_range_to_bin(
-            lf, file_offset, byte_len, bin_path)
+        # Write the concatenated bin, hashing the whole thing in one pass.
+        md5_hex, sha256_hex, written = self._write_batch_bin(batch, bin_path)
         self.log(Level.INFO,
-                 "Wrote bin %s (%s bytes) md5=%s sha256=%s" %
-                 (name, byte_len, md5_hex, sha256_hex))
-        # Record bin provenance BEFORE any cleanup, so the hash survives even
-        # when the (large, otherwise useless) .bin itself is deleted.
+                 "Wrote batch bin %s (%s runs, %s bytes) md5=%s sha256=%s" %
+                 (name, range_count, written, md5_hex, sha256_hex))
+        # Provenance recorded BEFORE cleanup: the batch hash, and each original
+        # run mapped to this batch (so deleting the bin loses nothing).
         self._bin_records.append(
-            [name, byte_start, byte_len, md5_hex, sha256_hex])
+            [name, range_count, written, md5_hex, sha256_hex])
+        for (lf, lf_id, file_offset, byte_start, byte_len) in batch:
+            self._range_records.append([name, lf_id, byte_start, byte_len])
 
-        # Carve this bin with PhotoRec into a per-bin work dir.
+        # One PhotoRec call for the whole batch.
         bin_work = os.path.join(work_dir, bin_base)
         self._ensure_dir(bin_work)
         recup_prefix = os.path.join(bin_work, "recup_dir")
-
         exit_code = self._run_photorec(bin_path, recup_prefix)
         self.log(Level.INFO, "PhotoRec exit=%s for %s" % (exit_code, name))
 
-        # Preserve the photorec.log (forensic record).
         self._preserve_photorec_log(bin_work, logs_dir, bin_base)
 
-        # Sort carved output by MIME into carved/<mime_folder>/.
+        # parent LayoutFile for optional derived-file registration: use the
+        # first run's layout file (carved offsets can't be mapped per-run).
+        parent_lf = batch[0][0] if batch else None
         n_carved = self._sort_carved_output(
-            bin_work, carved_dir, bin_base, name, lf, manifest_rows)
+            bin_work, carved_dir, bin_base, name, parent_lf, manifest_rows)
         self.log(Level.INFO,
-                 "Sorted %s carved files from %s" % (n_carved, name))
+                 "Sorted %s kept carved files from %s" % (n_carved, name))
 
-        # ----- clean up as we go (avoid bloating the case) -----
-        # 1. The per-bin PhotoRec scratch dir (recup_dir.N, thumbnails,
-        #    report.xml, etc.) is pure intermediate data -- always remove it.
-        #    photorec.log was already copied to photorec_logs/ above.
+        # ----- clean up as we go (per batch) -----
         self._delete_tree(bin_work)
-        # 2. The raw .bin is a full copy of unallocated space; once carved it is
-        #    dead weight. Delete it unless the analyst opted to keep bins. Its
-        #    hash is preserved in bins_manifest.csv regardless.
         if not self.local_settings.getKeepBins():
             self._delete_path(bin_path)
 
-    def _extract_range_to_bin(self, lf, file_offset, byte_len, bin_path):
-        """Read one range from the LayoutFile in chunks and write it to a .bin,
-        computing MD5 and SHA-256 in the same pass. Returns (md5_hex, sha256)."""
+    def _write_batch_bin(self, batch, bin_path):
+        """Concatenate every run in the batch into one .bin, computing MD5 and
+        SHA-256 across the whole concatenation. Returns (md5, sha256, total)."""
         md5, sha256 = self._get_digests()
         buf = self._io_buffer()
         out = FileOutputStream(File(bin_path))
-        remaining = long(byte_len)
-        local_off = long(file_offset)
+        total = 0
         try:
-            while remaining > 0:
+            for (lf, lf_id, file_offset, byte_start, byte_len) in batch:
                 if self.context.dataSourceIngestIsCancelled():
                     break
-                to_read = READ_CHUNK_SIZE
-                if remaining < READ_CHUNK_SIZE:
-                    to_read = int(remaining)
-                # LayoutFile.read(byte[] buf, long offset, long len) -> int read.
-                # TODO: verify exact signature against installed TSK build;
-                # fallback would be Content.read with the same arguments.
-                nread = lf.read(buf, local_off, to_read)
-                if nread <= 0:
-                    self.log(Level.WARNING,
-                             "Short read at offset=%s (got %s); stopping run." %
-                             (local_off, nread))
-                    break
-                out.write(buf, 0, nread)
-                md5.update(buf, 0, nread)
-                sha256.update(buf, 0, nread)
-                local_off = local_off + nread
-                remaining = remaining - nread
+                total = total + self._append_range(
+                    lf, file_offset, byte_len, out, md5, sha256, buf)
         finally:
             out.close()
-        return (self._hex(md5.digest()), self._hex(sha256.digest()))
+        return (self._hex(md5.digest()), self._hex(sha256.digest()), total)
+
+    def _append_range(self, lf, file_offset, byte_len, out, md5, sha256, buf):
+        """Read one run from the LayoutFile in chunks, append it to the already
+        open output stream, and fold it into the digests. Returns bytes written."""
+        remaining = long(byte_len)
+        local_off = long(file_offset)
+        written = 0
+        while remaining > 0:
+            if self.context.dataSourceIngestIsCancelled():
+                break
+            to_read = READ_CHUNK_SIZE
+            if remaining < READ_CHUNK_SIZE:
+                to_read = int(remaining)
+            # LayoutFile.read(byte[] buf, long offset, long len) -> int read.
+            nread = lf.read(buf, local_off, to_read)
+            if nread <= 0:
+                self.log(Level.WARNING,
+                         "Short read at offset=%s (got %s); stopping run." %
+                         (local_off, nread))
+                break
+            out.write(buf, 0, nread)
+            md5.update(buf, 0, nread)
+            sha256.update(buf, 0, nread)
+            local_off = local_off + nread
+            remaining = remaining - nread
+            written = written + nread
+        return written
 
     def _run_photorec(self, bin_path, recup_prefix):
         """Invoke photorec_win.exe on one bin via ProcessBuilder + ExecUtil so
@@ -1420,12 +1525,26 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             self.log(Level.WARNING, "Could not delete %s" % (f.getPath(),))
 
     def _write_bins_manifest(self, path):
+        # One row per batch bin (the unit PhotoRec was actually run on).
         f = open(path, "wb")
         try:
             writer = csv.writer(f)
-            writer.writerow(["bin_name", "byte_start", "byte_len", "md5",
+            writer.writerow(["bin_name", "range_count", "total_bytes", "md5",
                              "sha256"])
             for row in self._bin_records:
+                writer.writerow([self._csv_cell(c) for c in row])
+        finally:
+            f.close()
+
+    def _write_batch_ranges(self, path):
+        # One row per original unallocated run, mapping it to its batch bin --
+        # full provenance even though runs are concatenated for carving.
+        f = open(path, "wb")
+        try:
+            writer = csv.writer(f)
+            writer.writerow(["bin_name", "layout_file_id", "byte_start",
+                             "byte_len"])
+            for row in getattr(self, "_range_records", []):
                 writer.writerow([self._csv_cell(c) for c in row])
         finally:
             f.close()
@@ -1501,9 +1620,16 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                     (self._html(ds_name),))
         html.append("<tr><td>Module</td><td>%s %s</td></tr>" %
                     (MODULE_NAME, MODULE_VERSION))
-        html.append("<tr><td>Bins (contiguous unallocated runs) written</td>"
+        html.append("<tr><td>PhotoRec batches (bins carved)</td>"
                     "<td>%s</td></tr>" % (bins_written,))
-        html.append("<tr><td>Carved files</td><td>%s</td></tr>" %
+        try:
+            bmb = self.local_settings.getBatchSizeMB()
+        except Exception:
+            bmb = "?"
+        html.append("<tr><td>Batch size</td><td>%s MB (runs concatenated per "
+                    "PhotoRec call; see bins_manifest.csv + batch_ranges.csv)"
+                    "</td></tr>" % (bmb,))
+        html.append("<tr><td>Carved files kept</td><td>%s</td></tr>" %
                     (carved_total,))
         html.append("<tr><td>Manifest (CSV)</td><td>%s</td></tr>" %
                     (self._html(manifest_path),))
