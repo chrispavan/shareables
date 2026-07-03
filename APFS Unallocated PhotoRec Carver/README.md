@@ -94,7 +94,7 @@ This module uses **only Java APIs through Jython** for native work (no
 ## Install
 
 The distribution zip's top folder is **version-stamped**
-(`APFS_Unalloc_PhotoRec_Carver_v1_5_0`). Installing each release into its own
+(`APFS_Unalloc_PhotoRec_Carver_v1_5_1`). Installing each release into its own
 folder is deliberate: a new folder name forces Jython to compile the module
 fresh and makes it impossible for a stale cached `…$py.class` from a previous
 version to keep running (the #1 cause of "my fix didn't take effect").
@@ -107,14 +107,14 @@ version to keep running (the #1 cause of "my fix didn't take effect").
    `python_modules\` — do not rename it and do not nest it.
 4. Restart Autopsy.
 5. In the ingest-module list, confirm the entry reads
-   **"APFS Unalloc PhotoRec Carver v1.5.0"**. The version in the name tells you
+   **"APFS Unalloc PhotoRec Carver v1.5.1"**. The version in the name tells you
    exactly which build is loaded; if it doesn't match, the new folder isn't
    being picked up.
 
 Full install path:
 
 ```
-%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver_v1_5_0\apfs_unalloc_photorec_carver.py
+%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver_v1_5_1\apfs_unalloc_photorec_carver.py
 ```
 
 (`selftest_logic.py` is a developer test — do **not** copy it into the Autopsy
@@ -140,9 +140,10 @@ modules folder.)
      **The default is WAV only.** PhotoRec carves *all* types; this selection
      is applied as an **output filter by MIME** — only the ticked types are
      moved into `carved/` and the manifest, the rest are discarded with the
-     scratch dir. Use *Select all* / *Select none (WAV default)* for the
-     extremes. (Per-family selection is done on our side, not in PhotoRec,
-     because PhotoRec's per-family `fileopt` tokens vary by build and version
+     scratch dir. **Uncheck everything (or *Uncheck all*) to keep EVERY type**
+     — an empty selection means "no filter", not "revert to WAV". *Select all*
+     keeps all listed families. (Per-family selection is done on our side, not
+     in PhotoRec, because PhotoRec's per-family `fileopt` tokens vary by build
      and can't be hardcoded reliably — some builds reject `wav`.)
    - **Advanced: raw PhotoRec `/cmd` override** — blank by default. If you type
      a raw command tail here it is used verbatim, and no MIME filter is applied

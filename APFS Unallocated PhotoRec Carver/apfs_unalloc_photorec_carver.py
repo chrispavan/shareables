@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.5.0"
+MODULE_VERSION = "1.5.1"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -477,8 +477,11 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
         self.selected_volume_label = "(container-wide)"
         # Path to photorec_win.exe (pre-filled to a sensible default).
         self.photorec_path = DEFAULT_PHOTOREC_PATH
-        # PhotoRec file families to carve. Default: WAV only.
-        self.selected_families = list(DEFAULT_FAMILIES)
+        # File families to KEEP, stored as a plain CSV STRING (not a list):
+        # Autopsy serializes these settings, and a String round-trips reliably
+        # whereas a Python list may be dropped -- which silently reverted the
+        # selection to the default. Default: WAV only. Empty string = keep all.
+        self.selected_families_csv = ",".join(DEFAULT_FAMILIES)
         # Advanced: if non-empty, this raw /cmd tail is used verbatim and the
         # family selection above is ignored. Empty => build from families.
         self.raw_command_override = ""
@@ -516,13 +519,26 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
         self.photorec_path = path
 
     def getSelectedFamilies(self):
-        fams = getattr(self, "selected_families", None)
-        if not fams:
+        """Families to KEEP. Returns:
+          * the configured list (possibly EMPTY, meaning 'keep everything'),
+          * or the WAV default only when never configured at all.
+        An empty selection is NO LONGER silently turned back into WAV."""
+        csv = getattr(self, "selected_families_csv", None)
+        if csv is None:
+            # Back-compat with an older list attribute, else the fresh default.
+            legacy = getattr(self, "selected_families", None)
+            if legacy is not None:
+                return [f for f in legacy if f]
             return list(DEFAULT_FAMILIES)
-        return list(fams)
+        return [f.strip() for f in csv.split(",") if f.strip()]
 
     def setSelectedFamilies(self, families):
-        self.selected_families = list(families) if families else list(DEFAULT_FAMILIES)
+        # None means "not configured" -> keep the default; an empty list means
+        # the analyst explicitly cleared it -> keep everything (stored as "").
+        if families is None:
+            families = list(DEFAULT_FAMILIES)
+        self.selected_families_csv = ",".join(
+            [str(f).strip() for f in families if f and str(f).strip()])
 
     def getRawCommandOverride(self):
         return getattr(self, "raw_command_override", "")
@@ -673,7 +689,8 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         # this is an output filter by MIME.
         self._grid_add(JLabel("<html>File types to <b>keep</b> "
                               "(<b>default: WAV only</b>). PhotoRec carves all "
-                              "types; only the ticked ones are kept:</html>"),
+                              "types; only the ticked ones are kept. "
+                              "<b>Uncheck all = keep EVERY type.</b></html>"),
                        top=10)
         familiesPanel = JPanel()
         familiesPanel.setLayout(BoxLayout(familiesPanel, BoxLayout.Y_AXIS))
@@ -690,7 +707,7 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         buttonRow.setLayout(BoxLayout(buttonRow, BoxLayout.X_AXIS))
         self.selectAllButton = JButton("Select all",
                                        actionPerformed=self.onSelectAll)
-        self.selectNoneButton = JButton("Select none (WAV default)",
+        self.selectNoneButton = JButton("Uncheck all (keep every type)",
                                         actionPerformed=self.onSelectNone)
         buttonRow.add(self.selectAllButton)
         buttonRow.add(self.selectNoneButton)
@@ -799,9 +816,10 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self._capture_families()
 
     def onSelectNone(self, event):
-        # "None" means fall back to the WAV-only default, never an empty carve.
-        for key, cb in self.family_checks.items():
-            cb.setSelected(key in DEFAULT_FAMILIES)
+        # Uncheck everything. An empty selection now means KEEP EVERY type
+        # (no MIME filter), NOT "revert to WAV".
+        for cb in self.family_checks.values():
+            cb.setSelected(False)
         self._capture_families()
 
     def _selected_families(self):
@@ -937,14 +955,22 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         # (raw-command override in use, or every listed family selected).
         raw = self.local_settings.getRawCommandOverride()
         fams = self.local_settings.getSelectedFamilies()
-        if (raw and raw.strip()) or set(fams) >= set(PHOTOREC_FAMILY_KEYS):
+        if raw and raw.strip():
+            # Power user drives PhotoRec directly -> keep everything it carves.
+            self._keep_mimes = None
+        elif not fams:
+            # Explicitly cleared selection => keep EVERYTHING (NOT wav). This is
+            # the fix for "unchecked wav but only wav came back".
+            self._keep_mimes = None
+        elif set(fams) >= set(PHOTOREC_FAMILY_KEYS):
+            # Every listed family selected => no point filtering.
             self._keep_mimes = None
         else:
             self._keep_mimes = set(PHOTOREC_FAMILY_MIME[f] for f in fams
                                    if f in PHOTOREC_FAMILY_MIME)
         self.log(Level.INFO, "APFS carver v%s starting; photorec=%s; "
-                 "keep_mimes=%s" %
-                 (MODULE_VERSION, photorec,
+                 "selected_families=[%s]; keep_mimes=%s" %
+                 (MODULE_VERSION, photorec, ",".join(fams),
                   "ALL" if self._keep_mimes is None
                   else ",".join(sorted(self._keep_mimes))))
 
@@ -1634,7 +1660,10 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         html.append("<tr><td>Manifest (CSV)</td><td>%s</td></tr>" %
                     (self._html(manifest_path),))
         try:
-            fams = ", ".join(self.local_settings.getSelectedFamilies())
+            if getattr(self, "_keep_mimes", None) is None:
+                fams = "ALL types (no filter)"
+            else:
+                fams = ", ".join(self.local_settings.getSelectedFamilies())
         except Exception:
             fams = "(unknown)"
         try:
