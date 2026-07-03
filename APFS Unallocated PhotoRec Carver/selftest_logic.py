@@ -28,12 +28,15 @@ HELPERS = [
     "build_photorec_command",
     "plan_batches",
     "batch_bin_name",
+    "build_keep_extensions",
+    "file_extension",
 ]
 
-# Constants the helpers reference at module scope.
+# Constants/modules the helpers reference at module scope.
 PRELUDE = {
     "DEFAULT_MIME": "application/octet-stream",
     "STRUCTURAL_TYPE_NAMES": ("Image", "VolumeSystem", "Volume", "Pool"),
+    "os": os,
 }
 
 
@@ -196,6 +199,27 @@ def run():
     eq(h["batch_bin_name"](1, 42, 1048576),
        "unalloc_batch_0001_runs42_len1048576.bin", "batch name")
     checks += 1
+
+    # build_keep_extensions: selecting a family keeps its aliases too, closing
+    # the "MP4 named .mov" gap.
+    ALIASES = {"mp4": ["mov", "m4v"], "jpg": ["jpeg"], "tif": ["tiff"]}
+    eq(sorted(h["build_keep_extensions"](["mp4"], ALIASES)),
+       ["m4v", "mov", "mp4"], "keep-ext mp4 group")
+    eq(sorted(h["build_keep_extensions"](["jpg", "tif"], ALIASES)),
+       ["jpeg", "jpg", "tif", "tiff"], "keep-ext multi")
+    eq(sorted(h["build_keep_extensions"](["wav"], ALIASES)),
+       ["wav"], "keep-ext no-alias")
+    eq(h["build_keep_extensions"]([], ALIASES), set(), "keep-ext empty")
+    # case/space normalization + drop empties.
+    eq(sorted(h["build_keep_extensions"]([" MP4 ", "", None], ALIASES)),
+       ["m4v", "mov", "mp4"], "keep-ext normalize")
+    checks += 5
+
+    # file_extension
+    eq(h["file_extension"]("recup_dir.1/f0001.JPG"), "jpg", "ext jpg")
+    eq(h["file_extension"]("f0002.mov"), "mov", "ext mov")
+    eq(h["file_extension"]("noext"), "", "ext none")
+    checks += 3
 
     print("OK - %d assertions passed across %d helpers" %
           (checks, len(HELPERS)))

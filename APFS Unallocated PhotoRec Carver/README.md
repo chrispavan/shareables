@@ -94,7 +94,7 @@ This module uses **only Java APIs through Jython** for native work (no
 ## Install
 
 The distribution zip's top folder is **version-stamped**
-(`APFS_Unalloc_PhotoRec_Carver_v1_5_1`). Installing each release into its own
+(`APFS_Unalloc_PhotoRec_Carver_v1_5_2`). Installing each release into its own
 folder is deliberate: a new folder name forces Jython to compile the module
 fresh and makes it impossible for a stale cached `…$py.class` from a previous
 version to keep running (the #1 cause of "my fix didn't take effect").
@@ -107,14 +107,14 @@ version to keep running (the #1 cause of "my fix didn't take effect").
    `python_modules\` — do not rename it and do not nest it.
 4. Restart Autopsy.
 5. In the ingest-module list, confirm the entry reads
-   **"APFS Unalloc PhotoRec Carver v1.5.1"**. The version in the name tells you
+   **"APFS Unalloc PhotoRec Carver v1.5.2"**. The version in the name tells you
    exactly which build is loaded; if it doesn't match, the new folder isn't
    being picked up.
 
 Full install path:
 
 ```
-%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver_v1_5_1\apfs_unalloc_photorec_carver.py
+%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver_v1_5_2\apfs_unalloc_photorec_carver.py
 ```
 
 (`selftest_logic.py` is a developer test — do **not** copy it into the Autopsy
@@ -237,11 +237,13 @@ checklist exposes (matched against each carved file's detected MIME):
 | `gpx` | `application/gpx+xml` | GPS exchange | `carved/application_gpx+xml/` |
 
 Notes:
-- The **MIME type** column is what the filter matches against. PhotoRec runs a
-  single fixed command that carves everything
+- PhotoRec runs a single fixed command that carves everything
   (`partition_none,wholespace,fileopt,everything,enable,search`); a carved file
-  is **kept** only if its detected MIME is in your selected set, otherwise it is
-  discarded with the scratch dir. The **PhotoRec key** is shown for reference.
+  is **kept** if its **extension** matches a selected family's extension group
+  **or** its detected **MIME** is in the selected set, otherwise it is discarded
+  with the scratch dir. Matching the extension group (not just one MIME) means
+  selecting `mp4` also keeps a file PhotoRec named `.mov`, `jpg` keeps `.jpeg`,
+  `zip` keeps `.docx`, etc.
 - The **output folder** is derived from each carved file's extension→MIME (the
   table above; PhotoRec names files by signature) and only falls back to
   `java.nio.file.Files.probeContentType` for unknown extensions, so a file may

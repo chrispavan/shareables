@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.5.1"
+MODULE_VERSION = "1.5.2"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -206,6 +206,35 @@ PHOTOREC_FAMILIES = [
 PHOTOREC_FAMILY_KEYS = [fam[0] for fam in PHOTOREC_FAMILIES]
 PHOTOREC_FAMILY_MIME = dict((fam[0], fam[1]) for fam in PHOTOREC_FAMILIES)
 
+# Extra extensions PhotoRec may emit for a given family, beyond the family key
+# itself. The output keep-filter matches a carved file if its extension is the
+# family key OR any of these aliases -- so selecting "mp4" also keeps a file
+# PhotoRec named ".mov" (both are the same ISO base-media family), "jpg" keeps
+# ".jpeg", "zip" keeps ".docx", etc. Keys not listed here just match their own
+# extension. (Only aliases are listed; the key is always included.)
+FAMILY_EXTENSION_ALIASES = {
+    "mov":  ["mp4", "m4v", "m4a", "3gp", "3g2", "qt"],
+    "mp4":  ["mov", "m4v", "m4a", "3gp", "3g2", "qt"],
+    "jpg":  ["jpeg"],
+    "tif":  ["tiff"],
+    "html": ["htm"],
+    "mid":  ["midi"],
+    "aac":  ["m4a"],
+    "wma":  ["asf"],
+    "asf":  ["wmv", "wma"],
+    "mkv":  ["webm"],
+    "mpg":  ["mpeg"],
+    "ogg":  ["oga", "ogv"],
+    "au":   ["snd"],
+    "heic": ["heif"],
+    "doc":  ["xls", "ppt", "msi"],
+    "zip":  ["docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "jar", "apk"],
+    "sqlite": ["sqlite3", "db"],
+    "mdb":  ["accdb"],
+    "pst":  ["ost"],
+    "exe":  ["dll", "sys"],
+}
+
 # Default is WAV only -- deliberately narrow, not "everything".
 DEFAULT_FAMILIES = ["wav"]
 
@@ -267,6 +296,43 @@ def plan_batches(sizes, batch_size):
             i += 1
         batches.append((start, i))
     return batches
+
+
+def build_keep_extensions(selected_keys, aliases):
+    """Set of file extensions to KEEP, given the selected family keys. Each key
+    contributes itself plus any aliases (so 'mp4' also keeps 'mov'). Lower-cased.
+
+    >>> sorted(build_keep_extensions(["mp4"], {"mp4": ["mov", "m4v"]}))
+    ['m4v', 'mov', 'mp4']
+    >>> sorted(build_keep_extensions(["jpg"], {"jpg": ["jpeg"]}))
+    ['jpeg', 'jpg']
+    >>> sorted(build_keep_extensions(["wav"], {}))
+    ['wav']
+    >>> sorted(build_keep_extensions([], {"mp4": ["mov"]}))
+    []
+    """
+    keep = set()
+    for key in (selected_keys or []):
+        if not key:
+            continue
+        kk = str(key).strip().lower()
+        if not kk:
+            continue
+        keep.add(kk)
+        for ext in aliases.get(kk, []):
+            keep.add(str(ext).strip().lower())
+    return keep
+
+
+def file_extension(path):
+    """Lower-cased extension of a path without the dot ('' if none).
+
+    >>> file_extension("recup_dir.1/f0001.JPG")
+    'jpg'
+    >>> file_extension("noext")
+    ''
+    """
+    return os.path.splitext(path)[1].lower().lstrip(".")
 
 
 def bin_name(layout_file_id, byte_start, byte_len):
@@ -883,9 +949,12 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         self._sha256 = None
         # Shared empty file used to hand PhotoRec an EOF on stdin (created once).
         self._empty_stdin_path = None
-        # Output keep-filter: set of MIME types to retain, or None = keep all.
-        # PhotoRec carves every type; this enforces the analyst's selection.
+        # Output keep-filter (None on either = keep everything): a carved file
+        # is kept if its EXTENSION is in _keep_extensions OR its detected MIME is
+        # in _keep_mimes. Matching on the PhotoRec extension group closes the
+        # gap where e.g. an MP4 named ".mov" would miss a MIME-only filter.
         self._keep_mimes = None
+        self._keep_extensions = None
 
     def _io_buffer(self):
         if self._io_buf is None:
@@ -955,22 +1024,30 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         # (raw-command override in use, or every listed family selected).
         raw = self.local_settings.getRawCommandOverride()
         fams = self.local_settings.getSelectedFamilies()
+        keep_all = False
         if raw and raw.strip():
             # Power user drives PhotoRec directly -> keep everything it carves.
-            self._keep_mimes = None
+            keep_all = True
         elif not fams:
             # Explicitly cleared selection => keep EVERYTHING (NOT wav). This is
             # the fix for "unchecked wav but only wav came back".
-            self._keep_mimes = None
+            keep_all = True
         elif set(fams) >= set(PHOTOREC_FAMILY_KEYS):
             # Every listed family selected => no point filtering.
+            keep_all = True
+        if keep_all:
             self._keep_mimes = None
+            self._keep_extensions = None
         else:
             self._keep_mimes = set(PHOTOREC_FAMILY_MIME[f] for f in fams
                                    if f in PHOTOREC_FAMILY_MIME)
+            self._keep_extensions = build_keep_extensions(
+                fams, FAMILY_EXTENSION_ALIASES)
         self.log(Level.INFO, "APFS carver v%s starting; photorec=%s; "
-                 "selected_families=[%s]; keep_mimes=%s" %
+                 "selected_families=[%s]; keep_exts=%s; keep_mimes=%s" %
                  (MODULE_VERSION, photorec, ",".join(fams),
+                  "ALL" if self._keep_extensions is None
+                  else ",".join(sorted(self._keep_extensions)),
                   "ALL" if self._keep_mimes is None
                   else ",".join(sorted(self._keep_mimes))))
 
@@ -1336,11 +1413,16 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                 try:
                     mime = self.detect_mime_for_path(src)
                     # Enforce the analyst's file-type selection here (PhotoRec
-                    # carved everything). Files whose MIME isn't selected are
-                    # left in the scratch dir, which is deleted after sorting --
-                    # so they never reach carved/ or the manifest.
-                    if self._keep_mimes is not None and mime not in self._keep_mimes:
-                        continue
+                    # carved everything). Keep a file if its EXTENSION is in the
+                    # selected families' extension groups OR its detected MIME is
+                    # selected -- matching either avoids dropping e.g. an MP4
+                    # PhotoRec named ".mov". Non-matching files stay in the
+                    # scratch dir, which is deleted after sorting.
+                    if self._keep_extensions is not None:
+                        ext = file_extension(fname)
+                        if (ext not in self._keep_extensions
+                                and mime not in self._keep_mimes):
+                            continue
                     folder = mime_to_folder(mime)
                     dest_dir = os.path.join(carved_dir, folder)
                     self._ensure_dir(dest_dir)
