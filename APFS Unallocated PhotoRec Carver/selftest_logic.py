@@ -158,21 +158,21 @@ def run():
     # build_photorec_command — default WAV only; raw (partition_none) whole
     # space; enables ONLY the selection.
     eq(h["build_photorec_command"](["wav"]),
-       "partition_none,fileopt,everything,disable,wav,enable,wholespace,search",
+       "partition_none,wholespace,fileopt,everything,disable,wav,enable,search",
        "cmd wav")
     eq(h["build_photorec_command"]([]),
-       "partition_none,fileopt,everything,disable,wav,enable,wholespace,search",
+       "partition_none,wholespace,fileopt,everything,disable,wav,enable,search",
        "cmd empty->wav")
     eq(h["build_photorec_command"](None),
-       "partition_none,fileopt,everything,disable,wav,enable,wholespace,search",
+       "partition_none,wholespace,fileopt,everything,disable,wav,enable,search",
        "cmd None->wav")
     eq(h["build_photorec_command"](["jpg", "png"]),
-       "partition_none,fileopt,everything,disable,jpg,enable,png,enable,"
-       "wholespace,search", "cmd multi")
+       "partition_none,wholespace,fileopt,everything,disable,jpg,enable,"
+       "png,enable,search", "cmd multi")
     # dedupe + whitespace-trim + drop empties.
     eq(h["build_photorec_command"]([" jpg ", "jpg", "", None, "png"]),
-       "partition_none,fileopt,everything,disable,jpg,enable,png,enable,"
-       "wholespace,search", "cmd dedup/trim")
+       "partition_none,wholespace,fileopt,everything,disable,jpg,enable,"
+       "png,enable,search", "cmd dedup/trim")
     cmd_wav = h["build_photorec_command"](["wav"])
     # never carves "everything" implicitly.
     if "everything,enable" in cmd_wav:
@@ -180,7 +180,13 @@ def run():
     # raw, non-partitioned treatment must be present.
     if "partition_none" not in cmd_wav:
         raise AssertionError("cmd must treat bin as non-partitioned raw media")
-    checks += 7
+    # space selection must precede the fileopt file-type list (PhotoRec parses
+    # left-to-right; a space keyword after fileopt is a syntax error).
+    if cmd_wav.index("wholespace") > cmd_wav.index("fileopt"):
+        raise AssertionError("wholespace must come before fileopt")
+    if not cmd_wav.endswith(",search"):
+        raise AssertionError("search must be the final token")
+    checks += 8
 
     print("OK - %d assertions passed across %d helpers" %
           (checks, len(HELPERS)))

@@ -114,7 +114,7 @@ modules folder.)
      a raw command tail here it is used verbatim and the checklist is ignored
      (this reaches PhotoRec's full ~480-family signature set). Otherwise a
      selection of families builds
-     `partition_none,fileopt,everything,disable,<fam>,enable,wholespace,search`.
+     `partition_none,wholespace,fileopt,everything,disable,<fam>,enable,search`.
      `partition_none` treats each bin as **non-partitioned raw media** so
      PhotoRec doesn't false-detect a partition table / filesystem in the raw
      unallocated data; `wholespace` carves the whole bin (a bin *is* free
@@ -201,7 +201,7 @@ Notes:
 - The **PhotoRec key** is the family identifier PhotoRec's `fileopt` command
   toggles. The generated command enables *only* the ticked families and treats
   the bin as raw, non-partitioned media:
-  `partition_none,fileopt,everything,disable,<key>,enable,wholespace,search`.
+  `partition_none,wholespace,fileopt,everything,disable,<key>,enable,search`.
 - The **output folder** is derived from each carved file's extension→MIME (the
   table above; PhotoRec names files by signature) and only falls back to
   `java.nio.file.Files.probeContentType` for unknown extensions, so a file may
