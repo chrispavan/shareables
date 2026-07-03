@@ -107,18 +107,22 @@ modules folder.)
      TestDisk/PhotoRec distribution. There is no bundled PhotoRec. The module
      refuses to start (`IngestModuleException`) if the path does not exist, so
      the default only helps if PhotoRec really is installed there.
-   - **File types to carve** — a checklist of supported families (see below).
-     **The default is WAV only.** Nothing else is carved unless you tick it.
-     Use *Select all* / *Select none (WAV default)* for the extremes.
+   - **File types to keep** — a checklist of supported families (see below).
+     **The default is WAV only.** PhotoRec carves *all* types; this selection
+     is applied as an **output filter by MIME** — only the ticked types are
+     moved into `carved/` and the manifest, the rest are discarded with the
+     scratch dir. Use *Select all* / *Select none (WAV default)* for the
+     extremes. (Per-family selection is done on our side, not in PhotoRec,
+     because PhotoRec's per-family `fileopt` tokens vary by build and version
+     and can't be hardcoded reliably — some builds reject `wav`.)
    - **Advanced: raw PhotoRec `/cmd` override** — blank by default. If you type
-     a raw command tail here it is used verbatim and the checklist is ignored
-     (this reaches PhotoRec's full ~480-family signature set). Otherwise a
-     selection of families builds
-     `partition_none,wholespace,fileopt,everything,disable,<fam>,enable,search`.
+     a raw command tail here it is used verbatim, and no MIME filter is applied
+     (you're in full control of PhotoRec, incl. its ~480-family `fileopt` set).
+     Otherwise PhotoRec runs the fixed command
+     `partition_none,wholespace,fileopt,everything,enable,search`:
      `partition_none` treats each bin as **non-partitioned raw media** so
      PhotoRec doesn't false-detect a partition table / filesystem in the raw
-     unallocated data; `wholespace` carves the whole bin (a bin *is* free
-     space, so there is no live FS free-space map to use).
+     unallocated data; `wholespace` carves the whole bin.
    - **Register carved files as derived files** — optional; off by default.
    - **Keep extracted .bin files after carving** — optional; **off by default**
      (bins are deleted as carving proceeds to save disk; see *Cleanup* above).
@@ -133,9 +137,10 @@ explaining that TSK exposed no pool-level unallocated node and exits cleanly
 
 ## Supported file types → MIME → output folder
 
-**The default carve is WAV only.** Tick additional families in the settings
-panel to carve them; each carved file is sorted into a `carved/<mime>/` folder
-named from its detected MIME type. The families the checklist exposes:
+**The default keep-set is WAV only.** PhotoRec carves all types; tick
+additional families to keep them. Each kept file is sorted into a
+`carved/<mime>/` folder named from its detected MIME type. The families the
+checklist exposes (matched against each carved file's detected MIME):
 
 | PhotoRec key | MIME type | Description | Output folder |
 |---|---|---|---|
@@ -198,10 +203,11 @@ named from its detected MIME type. The families the checklist exposes:
 | `gpx` | `application/gpx+xml` | GPS exchange | `carved/application_gpx+xml/` |
 
 Notes:
-- The **PhotoRec key** is the family identifier PhotoRec's `fileopt` command
-  toggles. The generated command enables *only* the ticked families and treats
-  the bin as raw, non-partitioned media:
-  `partition_none,wholespace,fileopt,everything,disable,<key>,enable,search`.
+- The **MIME type** column is what the filter matches against. PhotoRec runs a
+  single fixed command that carves everything
+  (`partition_none,wholespace,fileopt,everything,enable,search`); a carved file
+  is **kept** only if its detected MIME is in your selected set, otherwise it is
+  discarded with the scratch dir. The **PhotoRec key** is shown for reference.
 - The **output folder** is derived from each carved file's extension→MIME (the
   table above; PhotoRec names files by signature) and only falls back to
   `java.nio.file.Files.probeContentType` for unknown extensions, so a file may

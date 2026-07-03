@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.4.1"
+MODULE_VERSION = "1.4.2"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -354,42 +354,29 @@ def is_structural_content(content):
 def build_photorec_command(families):
     """Build the PhotoRec /cmd tail that enables ONLY the given file families.
 
-    An unallocated bin is RAW free space, not a partitioned disk. Token ORDER
-    matters to PhotoRec's /cmd parser: partition/space selection must come
-    BEFORE the "fileopt" file-type list, and "search" must be last. Putting a
-    space keyword (wholespace) AFTER the fileopt list makes PhotoRec try to
-    parse it as a file family -> "Syntax error in command line".
-
+    An unallocated bin is RAW free space, not a partitioned disk:
       * "partition_none" -- treat the bin as non-partitioned raw media so
         PhotoRec does NOT parse a partition table out of random free-space
         bytes (which otherwise triggers false partition/FS detection).
       * "wholespace" -- carve the whole space, ignoring any (false) filesystem
         structure; there is no live FS free-space map to use anyway.
-    Then "fileopt": disable every family and enable exactly the requested ones.
-    Finally "search". An empty/whitespace selection falls back to WAV.
+      * "fileopt,everything,enable" -- enable ALL file families.
+      * "search" -- start the carve (must be the final token).
+
+    NOTE on file-type selection: PhotoRec's per-family "fileopt" tokens vary by
+    build/version and are unreliable to hardcode (e.g. some builds reject
+    "wav"), which produced "Syntax error in command line" and aborted the carve.
+    So we do NOT select families in the PhotoRec command any more. PhotoRec
+    carves everything with this known-good command, and the analyst's file-type
+    selection is enforced afterwards as an output filter by MIME type (see the
+    module's keep-set). `families` is therefore accepted but not used here.
 
     >>> build_photorec_command(["wav"])
-    'partition_none,wholespace,fileopt,everything,disable,wav,enable,search'
-    >>> build_photorec_command(["jpg", "png"])
-    'partition_none,wholespace,fileopt,everything,disable,jpg,enable,png,enable,search'
+    'partition_none,wholespace,fileopt,everything,enable,search'
     >>> build_photorec_command([])
-    'partition_none,wholespace,fileopt,everything,disable,wav,enable,search'
+    'partition_none,wholespace,fileopt,everything,enable,search'
     """
-    fams = []
-    for fam in (families or []):
-        if fam is None:
-            continue
-        key = fam.strip()
-        if key and key not in fams:
-            fams.append(key)
-    if not fams:
-        fams = ["wav"]
-    parts = ["partition_none", "wholespace", "fileopt", "everything", "disable"]
-    for key in fams:
-        parts.append(key)
-        parts.append("enable")
-    parts.append("search")
-    return ",".join(parts)
+    return "partition_none,wholespace,fileopt,everything,enable,search"
 
 
 # =============================================================================
@@ -612,10 +599,12 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self.volumeCombo = JComboBox()
         self._grid_add(self.volumeCombo)
 
-        # File families to carve (default: WAV only).
-        self._grid_add(JLabel("<html>File types to carve "
-                              "(<b>default: WAV only</b>). Each maps to a MIME "
-                              "folder in the output:</html>"), top=10)
+        # File families to KEEP (default: WAV only). PhotoRec carves all types;
+        # this is an output filter by MIME.
+        self._grid_add(JLabel("<html>File types to <b>keep</b> "
+                              "(<b>default: WAV only</b>). PhotoRec carves all "
+                              "types; only the ticked ones are kept:</html>"),
+                       top=10)
         familiesPanel = JPanel()
         familiesPanel.setLayout(BoxLayout(familiesPanel, BoxLayout.Y_AXIS))
         self.family_checks = {}   # photorec_key -> JCheckBox
@@ -795,6 +784,9 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         self._sha256 = None
         # Shared empty file used to hand PhotoRec an EOF on stdin (created once).
         self._empty_stdin_path = None
+        # Output keep-filter: set of MIME types to retain, or None = keep all.
+        # PhotoRec carves every type; this enforces the analyst's selection.
+        self._keep_mimes = None
 
     def _io_buffer(self):
         if self._io_buf is None:
@@ -857,8 +849,23 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                  self._exe_hint(photorec)))
         # Cache the cleaned, validated path for use during process().
         self._photorec_exe = photorec
-        self.log(Level.INFO, "APFS carver v%s starting; photorec=%s" %
-                 (MODULE_VERSION, photorec))
+
+        # PhotoRec carves every file type (its per-family tokens are unreliable
+        # across builds); the analyst's file-type selection is enforced here as
+        # an output filter by MIME. keep_mimes = None means keep everything
+        # (raw-command override in use, or every listed family selected).
+        raw = self.local_settings.getRawCommandOverride()
+        fams = self.local_settings.getSelectedFamilies()
+        if (raw and raw.strip()) or set(fams) >= set(PHOTOREC_FAMILY_KEYS):
+            self._keep_mimes = None
+        else:
+            self._keep_mimes = set(PHOTOREC_FAMILY_MIME[f] for f in fams
+                                   if f in PHOTOREC_FAMILY_MIME)
+        self.log(Level.INFO, "APFS carver v%s starting; photorec=%s; "
+                 "keep_mimes=%s" %
+                 (MODULE_VERSION, photorec,
+                  "ALL" if self._keep_mimes is None
+                  else ",".join(sorted(self._keep_mimes))))
 
     def _exe_hint(self, photorec):
         """Best-effort diagnostic appended to the not-found error: list the
@@ -1197,6 +1204,12 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                     continue
                 try:
                     mime = self.detect_mime_for_path(src)
+                    # Enforce the analyst's file-type selection here (PhotoRec
+                    # carved everything). Files whose MIME isn't selected are
+                    # left in the scratch dir, which is deleted after sorting --
+                    # so they never reach carved/ or the manifest.
+                    if self._keep_mimes is not None and mime not in self._keep_mimes:
+                        continue
                     folder = mime_to_folder(mime)
                     dest_dir = os.path.join(carved_dir, folder)
                     self._ensure_dir(dest_dir)
@@ -1502,8 +1515,8 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             cmd_used = self.local_settings.getPhotorecCmd()
         except Exception:
             cmd_used = "(unknown)"
-        html.append("<tr><td>File families carved</td><td>%s</td></tr>" %
-                    (self._html(fams),))
+        html.append("<tr><td>File types kept (MIME filter)</td><td>%s</td>"
+                    "</tr>" % (self._html(fams),))
         html.append("<tr><td>PhotoRec command</td><td><code>%s</code></td></tr>" %
                     (self._html(cmd_used),))
         try:
