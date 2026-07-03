@@ -107,7 +107,7 @@ except ImportError:
 
 # Module-level constants.
 MODULE_NAME = "APFS Unalloc PhotoRec Carver"
-MODULE_VERSION = "1.3.0"
+MODULE_VERSION = "1.4.0"
 
 # Read buffer for extraction and hashing: large enough to be efficient, small
 # enough that we never load a whole unallocated run into memory.
@@ -451,6 +451,11 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
         self.raw_command_override = ""
         # Optionally register carved files as derived files in the case.
         self.add_derived_files = False
+        # Keep the extracted .bin files after carving. Default False: delete
+        # them as we go so the case is not bloated with raw copies of
+        # unallocated space (their hashes are still recorded in
+        # bins_manifest.csv).
+        self.keep_bins = False
 
     def getVersionNumber(self):
         return self.serialVersionUID
@@ -500,6 +505,12 @@ class ApfsUnallocCarverSettings(IngestModuleIngestJobSettings):
 
     def setAddDerivedFiles(self, flag):
         self.add_derived_files = bool(flag)
+
+    def getKeepBins(self):
+        return getattr(self, "keep_bins", False)
+
+    def setKeepBins(self, flag):
+        self.keep_bins = bool(flag)
 
 
 # =============================================================================
@@ -636,6 +647,12 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
             actionPerformed=self.onDerivedToggle)
         self._grid_add(self.derivedCheck, top=10)
 
+        # Keep-bins checkbox (default off = clean up as we go).
+        self.keepBinsCheck = JCheckBox(
+            "Keep extracted .bin files after carving (uses much more disk)",
+            actionPerformed=self.onKeepBinsToggle)
+        self._grid_add(self.keepBinsCheck, top=2)
+
     def customizeComponents(self):
         # Populate volume combo.
         model = DefaultComboBoxModel()
@@ -665,6 +682,7 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self.photorecField.setText(self.local_settings.getPhotorecPath())
         self.cmdField.setText(self.local_settings.getRawCommandOverride())
         self.derivedCheck.setSelected(self.local_settings.getAddDerivedFiles())
+        self.keepBinsCheck.setSelected(self.local_settings.getKeepBins())
 
         # Restore family checkboxes (default WAV only).
         selected = set(self.local_settings.getSelectedFamilies())
@@ -699,6 +717,10 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
         self.local_settings.setAddDerivedFiles(self.derivedCheck.isSelected())
         self._capture_text_fields()
 
+    def onKeepBinsToggle(self, event):
+        self.local_settings.setKeepBins(self.keepBinsCheck.isSelected())
+        self._capture_text_fields()
+
     def onSelectAll(self, event):
         for cb in self.family_checks.values():
             cb.setSelected(True)
@@ -731,6 +753,7 @@ class ApfsUnallocCarverSettingsPanel(IngestModuleIngestJobSettingsPanel):
             self.local_settings.setSelectedVolume(
                 self._volume_ids[idx], self.volumeCombo.getSelectedItem())
         self.local_settings.setAddDerivedFiles(self.derivedCheck.isSelected())
+        self.local_settings.setKeepBins(self.keepBinsCheck.isSelected())
         return self.local_settings
 
 
@@ -898,6 +921,8 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             self._prepare_dirs(dataSource)
         manifest_path = os.path.join(ds_dir, "manifest.csv")
         manifest_rows = []
+        bins_manifest_path = os.path.join(ds_dir, "bins_manifest.csv")
+        self._bin_records = []  # [name, byte_start, byte_len, md5, sha256]
 
         # 3. Count total ranges for a deterministic progress bar.
         total_ranges = 0
@@ -957,12 +982,27 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
 
         carved_total = len(manifest_rows)
 
-        # 5. Write manifest and report; surface in the case.
+        # 5. Write manifests and report; surface in the case.
         try:
             self._write_manifest(manifest_path, manifest_rows)
         except Exception:
             self.log(Level.WARNING,
                      "Failed writing manifest: %s" % (traceback.format_exc(),))
+
+        # Bin provenance manifest (survives deletion of the .bin files).
+        try:
+            self._write_bins_manifest(bins_manifest_path)
+        except Exception:
+            self.log(Level.WARNING,
+                     "Failed writing bins manifest: %s" %
+                     (traceback.format_exc(),))
+
+        # Remove the now-empty work/ scratch tree (per-bin dirs were deleted as
+        # we went; this clears the shared stdin-EOF file and the dir itself).
+        try:
+            self._delete_tree(work_dir)
+        except Exception:
+            pass
 
         report_path = os.path.join(ds_dir, "APFS_Unalloc_Carve_Report.html")
         try:
@@ -1003,6 +1043,10 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
         self.log(Level.INFO,
                  "Wrote bin %s (%s bytes) md5=%s sha256=%s" %
                  (name, byte_len, md5_hex, sha256_hex))
+        # Record bin provenance BEFORE any cleanup, so the hash survives even
+        # when the (large, otherwise useless) .bin itself is deleted.
+        self._bin_records.append(
+            [name, byte_start, byte_len, md5_hex, sha256_hex])
 
         # Carve this bin with PhotoRec into a per-bin work dir.
         bin_work = os.path.join(work_dir, bin_base)
@@ -1020,6 +1064,17 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             bin_work, carved_dir, bin_base, name, lf, manifest_rows)
         self.log(Level.INFO,
                  "Sorted %s carved files from %s" % (n_carved, name))
+
+        # ----- clean up as we go (avoid bloating the case) -----
+        # 1. The per-bin PhotoRec scratch dir (recup_dir.N, thumbnails,
+        #    report.xml, etc.) is pure intermediate data -- always remove it.
+        #    photorec.log was already copied to photorec_logs/ above.
+        self._delete_tree(bin_work)
+        # 2. The raw .bin is a full copy of unallocated space; once carved it is
+        #    dead weight. Delete it unless the analyst opted to keep bins. Its
+        #    hash is preserved in bins_manifest.csv regardless.
+        if not self.local_settings.getKeepBins():
+            self._delete_path(bin_path)
 
     def _extract_range_to_bin(self, lf, file_offset, byte_len, bin_path):
         """Read one range from the LayoutFile in chunks and write it to a .bin,
@@ -1316,6 +1371,49 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
             return []
         return list(names)
 
+    def _delete_path(self, path):
+        """Delete a single file (best-effort; logs but never raises)."""
+        try:
+            f = File(path)
+            if f.exists() and not f.delete():
+                self.log(Level.WARNING, "Could not delete file: %s" % (path,))
+        except Exception:
+            self.log(Level.WARNING,
+                     "Error deleting file %s: %s" % (path, traceback.format_exc()))
+
+    def _delete_tree(self, path):
+        """Recursively delete a directory tree (best-effort). Uses java.io.File
+        depth-first since File.delete only removes empty dirs."""
+        try:
+            self._delete_file_obj(File(path))
+        except Exception:
+            self.log(Level.WARNING,
+                     "Error deleting tree %s: %s" % (path, traceback.format_exc()))
+
+    def _delete_file_obj(self, f):
+        try:
+            if not f.exists():
+                return
+            if f.isDirectory():
+                children = f.listFiles()
+                if children is not None:
+                    for c in children:
+                        self._delete_file_obj(c)
+            f.delete()
+        except Exception:
+            self.log(Level.WARNING, "Could not delete %s" % (f.getPath(),))
+
+    def _write_bins_manifest(self, path):
+        f = open(path, "wb")
+        try:
+            writer = csv.writer(f)
+            writer.writerow(["bin_name", "byte_start", "byte_len", "md5",
+                             "sha256"])
+            for row in self._bin_records:
+                writer.writerow([self._csv_cell(c) for c in row])
+        finally:
+            f.close()
+
     def _hash_file_md5_sha256(self, path):
         """Compute MD5 and SHA-256 of a file in a SINGLE read pass, reusing the
         shared I/O buffer. Returns (md5_hex, sha256_hex)."""
@@ -1405,11 +1503,22 @@ class ApfsUnallocCarverModule(DataSourceIngestModule):
                     (self._html(fams),))
         html.append("<tr><td>PhotoRec command</td><td><code>%s</code></td></tr>" %
                     (self._html(cmd_used),))
+        try:
+            kept = self.local_settings.getKeepBins()
+        except Exception:
+            kept = False
+        html.append("<tr><td>Extracted .bin files</td><td>%s</td></tr>" %
+                    ("kept in bins/" if kept else
+                     "deleted after carving to save space (hashes retained "
+                     "in bins_manifest.csv)"))
         html.append("</table>")
         html.append("<p>Carved files are organized under <code>carved/&lt;mime&gt;"
                     "</code> folders. Every PhotoRec log is preserved under "
                     "<code>photorec_logs/</code>. SHA-256 and MD5 were computed "
-                    "for every bin and every carved file.</p>")
+                    "for every bin (recorded in <code>bins_manifest.csv</code>) "
+                    "and every carved file. Intermediate PhotoRec scratch data "
+                    "was cleaned up during processing to avoid bloating the "
+                    "case.</p>")
         html.append("</body></html>")
         f = open(path, "wb")
         try:

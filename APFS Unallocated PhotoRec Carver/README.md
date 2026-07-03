@@ -26,8 +26,8 @@ Under the case module directory:
 
 ```
 <Case>/ModuleOutput/APFS_Unalloc_PhotoRec_Carver/<dataSourceName>_<id>/
-├── bins/                       # one .bin per contiguous unallocated run
-│   └── unalloc_<layoutFileId>_off<byteStart>_len<byteLen>.bin
+├── bins/                       # empty by default (see cleanup below)
+│   └── unalloc_<layoutFileId>_off<byteStart>_len<byteLen>.bin   # only if "keep bins" is ticked
 ├── carved/                     # carved files sorted by MIME type
 │   ├── image_jpeg/
 │   ├── application_pdf/
@@ -35,14 +35,28 @@ Under the case module directory:
 │   └── ...
 ├── photorec_logs/              # every photorec.log, preserved
 │   └── <binbase>.photorec.log
-├── work/                       # PhotoRec recup_dir.N scratch (per bin)
 ├── manifest.csv                # source_bin, carved_file, mime, sha256
+├── bins_manifest.csv           # bin_name, byte_start, byte_len, md5, sha256
 └── APFS_Unalloc_Carve_Report.html
 ```
 
 `carved/<mime_top>_<subtype>/` — e.g. `image_jpeg`, `application_pdf`,
 `application_octet-stream`. Carved file names are prefixed with their source
 bin (`<binbase>__f0000001.jpg`) so files from different bins never collide.
+
+### Cleanup / disk usage
+
+To avoid bloating the case with useless intermediate data, the module cleans
+up **as it goes**:
+
+- Each `.bin` is a full raw copy of unallocated space. After its bin is carved,
+  the `.bin` is **deleted by default** (its MD5/SHA-256 are preserved in
+  `bins_manifest.csv` for provenance). Tick **"Keep extracted .bin files"** in
+  settings to retain them in `bins/` instead (uses far more disk).
+- The per-bin PhotoRec scratch dir (`recup_dir.N`, thumbnails, `report.xml`) is
+  **always** removed after its carved files are sorted out; the `work/` tree is
+  removed entirely at the end. Only the carved files, logs, manifests, and
+  report remain.
 
 ---
 
@@ -106,6 +120,8 @@ modules folder.)
      unallocated data; `wholespace` carves the whole bin (a bin *is* free
      space, so there is no live FS free-space map to use).
    - **Register carved files as derived files** — optional; off by default.
+   - **Keep extracted .bin files after carving** — optional; **off by default**
+     (bins are deleted as carving proceeds to save disk; see *Cleanup* above).
 4. Start ingest. Watch the **Ingest Inbox** for progress and the final summary,
    and open the report from the **Reports** tree.
 
