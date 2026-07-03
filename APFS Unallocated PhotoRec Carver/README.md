@@ -76,16 +76,28 @@ This module uses **only Java APIs through Jython** for native work (no
 
 ## Install
 
+The distribution zip's top folder is **version-stamped**
+(`APFS_Unalloc_PhotoRec_Carver_v1_4_2`). Installing each release into its own
+folder is deliberate: a new folder name forces Jython to compile the module
+fresh and makes it impossible for a stale cached `…$py.class` from a previous
+version to keep running (the #1 cause of "my fix didn't take effect").
+
 1. In Autopsy: **Tools → Python Plugins** (opens
    `%AppData%\autopsy\python_modules\`).
-2. Create a subfolder, e.g. `APFS_Unalloc_PhotoRec_Carver`.
-3. Copy `apfs_unalloc_photorec_carver.py` into that subfolder.
-4. Restart Autopsy (or it will pick the module up on the next ingest dialog).
+2. **Delete any previous `APFS_Unalloc_PhotoRec_Carver*` folder** for this
+   module so you don't end up with two copies in the ingest list.
+3. Unzip so the whole **version-named folder** lands directly under
+   `python_modules\` — do not rename it and do not nest it.
+4. Restart Autopsy.
+5. In the ingest-module list, confirm the entry reads
+   **"APFS Unalloc PhotoRec Carver v1.4.2"**. The version in the name tells you
+   exactly which build is loaded; if it doesn't match, the new folder isn't
+   being picked up.
 
 Full install path:
 
 ```
-%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver\apfs_unalloc_photorec_carver.py
+%AppData%\autopsy\python_modules\APFS_Unalloc_PhotoRec_Carver_v1_4_2\apfs_unalloc_photorec_carver.py
 ```
 
 (`selftest_logic.py` is a developer test — do **not** copy it into the Autopsy
